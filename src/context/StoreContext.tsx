@@ -73,6 +73,7 @@ interface StoreCtx {
   deleteMessage: (conversationId: string, messageId: string) => void;
   reactMessage: (conversationId: string, messageId: string, emoji: string) => void;
   markConversationRead: (conversationId: string) => void;
+  setTyping: (conversationId: string, active: boolean) => void;
   togglePin: (conversationId: string) => void;
   toggleMute: (conversationId: string) => void;
   toggleArchive: (conversationId: string) => void;
@@ -193,6 +194,8 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         messages: conversation.messages.map((message) => message.id === payload.messageId ? { ...message, status: "read" } : message),
       }));
     });
+    socket.on("presence:online", (payload: { userId?: string }) => { if (payload.userId) setRemoteUsers((previous) => previous[payload.userId!] ? { ...previous, [payload.userId!]: { ...previous[payload.userId!], online: true } } : previous); });
+    socket.on("presence:offline", (payload: { userId?: string }) => { if (payload.userId) setRemoteUsers((previous) => previous[payload.userId!] ? { ...previous, [payload.userId!]: { ...previous[payload.userId!], online: false } } : previous); });
     socket.on("connect", () => {
       void backend.getConversations().then((items) => {
         if (!live) return;
@@ -687,6 +690,10 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
     [patchConv, setNotifications, conversations, chatSocket],
   );
 
+  const setTyping = useCallback((conversationId: string, active: boolean) => {
+    if (chatSocket && isObjectId(conversationId)) chatSocket.emit("typing", { conversationId, active });
+  }, [chatSocket]);
+
   const startConversation = useCallback<StoreCtx["startConversation"]>(
     (userId) => {
       const existing = conversations.find((c) => !c.group && c.participantIds[0] === userId);
@@ -913,6 +920,7 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
       deleteMessage,
       reactMessage,
       markConversationRead,
+      setTyping,
       togglePin,
       toggleMute,
       toggleArchive,
@@ -933,7 +941,7 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
       unreadTotal, unreadNotifications, userById, toggleLike, toggleBookmark, toggleRepost, hidePost,
       reportPost, votePoll, addComment, toggleCommentLike, createPost, deletePost, updateProfile,
       toggleFollow, isFollowing, sendMessage, editMessage, deleteMessage, reactMessage,
-      markConversationRead, togglePin, toggleMute, toggleArchive, setWallpaper, startConversation,
+      markConversationRead, setTyping, togglePin, toggleMute, toggleArchive, setWallpaper, startConversation,
       forwardMessage, markNotificationRead, markAllNotificationsRead, clearNotifications,
       removeNotification, pushNotification, addRecentSearch, clearRecentSearches, resetDemoData,
     ],

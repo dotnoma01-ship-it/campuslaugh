@@ -26,7 +26,10 @@ app.use((_req, _res, next) => next(new ApiError(404, 'Route not found')));
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (err instanceof ApiError) return res.status(err.statusCode).json({ success: false, message: err.message, ...(err.details ? { details: err.details } : {}) });
   if (err instanceof multer.MulterError) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ success: false, message: err.code === 'LIMIT_FILE_SIZE' ? 'File exceeds the 50 MB limit.' : 'Invalid upload.' });
-  if (err && typeof err === 'object' && 'name' in err && err.name === 'ZodError') return res.status(400).json({ success: false, message: 'Invalid request' });
+  if (err && typeof err === 'object' && 'name' in err && err.name === 'ZodError') {
+    const issues = 'issues' in err && Array.isArray(err.issues) ? err.issues : [];
+    return res.status(400).json({ success: false, message: 'Invalid request', ...(env.nodeEnv !== 'production' ? { details: issues.map((issue: any) => ({ field: Array.isArray(issue.path) ? issue.path.join('.') : '', message: issue.message })) } : {}) });
+  }
   if (err && typeof err === 'object' && 'code' in err && err.code === 11000) return res.status(409).json({ success: false, message: 'A record with that value already exists' });
   if (env.nodeEnv !== 'production') console.error(err);
   return res.status(500).json({ success: false, message: 'Internal server error' });

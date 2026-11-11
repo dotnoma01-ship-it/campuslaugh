@@ -8,8 +8,10 @@ Status labels reflect the current implementation and verification; COMPLETE mean
 - **COMPLETE** — Backend and frontend package/lock files checked. Backend uses Zod 4.6.7; `npm ls` confirms esbuild 0.28.2 and iconv-lite 0.4.24. Zod schema smoke, esbuild TypeScript transform, and backend TypeScript build pass.
 - **COMPLETE** — Backend `.env` created only because it did not exist; ignored by Git. Set to requested local Mongo URI, port 5000, frontend URL, and distinct random 48-byte JWT secrets. Secret values were never printed.
 - **COMPLETE** — MongoDB connection verified; API health reported `mongodb: connected`. Startup waits for MongoDB and creates declared indexes without index drops or data reset.
+- **COMPLETE** — Local development is isolated from the existing backend `.env`: ignored `backend/.env.local` takes precedence and points to `127.0.0.1:27017/campuslaugh` with distinct generated local JWT secrets and blank Cloudinary fields. The local database responds with 1,190 active institutions. MongoDB service-control status cannot be queried under this Windows session, but localhost MongoDB connectivity and the API health check are verified.
 - **COMPLETE** — Backend HTTP suite passes 6/6.
 - **COMPLETE** — MongoDB-backed auth integration suite passes against the seeded directory, including a persisted C++ search result. Test-created user/post/token records are removed by exact generated test identity.
+- **COMPLETE** — Local chat integration test passes with temporary authenticated accounts: room membership enforcement, text delivery to two connected clients, typing and read events, REST history persistence, and group creation. Test accounts, messages, conversations, notifications and refresh tokens are cleaned up.
 - **COMPLETE** — Frontend TypeScript check and production build pass in the current project state.
 
 ## Backend/API features
@@ -18,7 +20,7 @@ Status labels reflect the current implementation and verification; COMPLETE mean
 - **PARTIAL** — Authentication: register/login/refresh rotation/logout/current user/password change, hashing and inactive-account rejection implemented and tested. Forgot/reset password is unavailable until email delivery is configured; change-password journey lacks a dedicated integration test.
 - **PARTIAL** — Institution API supports search, category/state/ownership/active filters, pagination, details, states/categories, institution requests and admin routes. Admin import/edit/review workflows need deeper authorization/API tests.
 - **PARTIAL** — Follow, like, comment/reply and repost actions now create persistent recipient notifications. Notification listing is paginated and populates actor profiles; frontend hydrates the persisted list and persists read/delete/clear actions. Post edit, hide, repost, and bookmark retrieval endpoints are available. Remaining privacy/follow-request, broad interaction, UI and authorization coverage gaps remain.
-- **PARTIAL** — Authenticated Socket.IO client now hydrates conversations, joins authorized rooms, sends persistent text, processes incoming messages/typing/read receipts, and has a REST fallback. REST supports message edit/delete/reactions and per-user pin/mute/archive settings. Group creation exists in the API. UI still uses local chat data while unauthenticated; group member administration, unread calculation, presence, forwarding, attachment uploads and full two-account integration verification remain.
+- **PARTIAL** — Authenticated Socket.IO client hydrates conversations, joins authorized rooms, sends persistent text, processes incoming messages/typing/read receipts and online/offline presence; the backend checks account activity and conversation membership. REST supports message edit/delete/reactions and per-user pin/mute/archive settings. Group creation exists in the API and two-account delivery is verified locally. Group member administration, unread calculation, forwarding and attachment uploads remain.
 - **BLOCKED** — Cloudinary upload UI validation needs Cloudinary credentials; no credentials are configured.
 
 ## Institution directory
@@ -36,14 +38,14 @@ Status labels reflect the current implementation and verification; COMPLETE mean
 | Home feed/composer/post actions | **PARTIAL** | Authenticated feed, publish/delete, like/bookmark, comments and post report use API; trending/announcements/side panels still use demo arrays. |
 | Profile/follow/settings | **PARTIAL** | API profile lookup/update, follow, logout, and password change calls exist. Counts, bookmarks view, images, block/mute and some settings are local/demo. |
 | Explore/search/hashtags | **PARTIAL** | Authenticated Explore search now calls the database API for users/posts/hashtags with debounce, cache hydration, loading, empty, and error/retry states; regex search input is escaped server-side. Browse/trending/discussion/gallery/announcement panels and hashtags detail screens still use demo data. |
-| Chats/messages | **PARTIAL** | Authenticated StoreContext hydrates Mongo conversations/messages and uses Socket.IO for sending, incoming delivery, typing and read receipts; REST persists edit/delete/reactions and pin/mute/archive. Unauthenticated demo remains; group UI/admin, attachment upload, presence, unread calculation and multi-account integration test remain. |
+| Chats/messages | **PARTIAL** | Authenticated StoreContext hydrates Mongo conversations/messages and uses Socket.IO for send/receive, typing, read receipts and presence; REST persists edit/delete/reactions and pin/mute/archive. Two-account local integration test passes. Unauthenticated demo remains; group UI/admin, attachment upload, unread calculation and forwarding remain. |
 | Notifications | **PARTIAL** | Follow, like, comment/reply and repost generate persistent notifications; authenticated StoreContext hydrates the API list and persists read/delete/clear actions. Other event types, realtime delivery, preferences, and eliminating demo notifications remain. |
 | Media uploads | **BLOCKED** | Cloudinary configuration exists but no credentials or connected UI upload flow. |
 | Admin/moderation | **PARTIAL** | Some admin-guarded routes exist; admin UI and complete moderation workflow are unfinished. |
 
 ## Next development tasks
 
-1. Replace local chat state with the existing REST API and authenticated Socket.IO client; complete message lifecycle and presence semantics.
+1. Finish group conversation management, chat attachments/forwarding, unread counts and moderation/report actions.
 2. Connect trending/hashtags and the remaining Explore panels to verified database results.
 3. Persist notification creation/preferences and connect the existing notification UI to REST and sockets.
 4. Add deeper automated authorization, route-validation, and password-change tests; run the full end-to-end user journey after each integration stage.

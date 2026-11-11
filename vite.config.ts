@@ -10,6 +10,7 @@ const __dirname = path.dirname(__filename);
 
 // https://vite.dev/config/
 export default defineConfig({
+  cacheDir: path.resolve(__dirname, ".vite-cache"),
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {
     alias: {

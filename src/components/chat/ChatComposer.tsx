@@ -39,7 +39,7 @@ export function ChatComposer({
   onCancelEdit: () => void;
   onPickMedia: (item: Message) => void;
 }) {
-  const { sendMessage, editMessage, userById, me } = useStore();
+  const { sendMessage, editMessage, setTyping, userById, me } = useStore();
   const { toast, haptic, showIsland } = useSystem();
   const [text, setText] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -54,6 +54,7 @@ export function ChatComposer({
   const analyserRef = useRef<number | null>(null);
   const tickRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const typingTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (replyTo || editTarget) {
@@ -69,11 +70,15 @@ export function ChatComposer({
     el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
   }, [text]);
 
+  useEffect(() => () => { if (typingTimerRef.current !== null) window.clearTimeout(typingTimerRef.current); setTyping(conversationId, false); }, [conversationId, setTyping]);
+
   const canSend = text.trim().length > 0;
 
   const send = () => {
     const value = text.trim();
     if (!value) return;
+    setTyping(conversationId, false);
+    if (typingTimerRef.current !== null) window.clearTimeout(typingTimerRef.current);
     if (editTarget) {
       editMessage(conversationId, editTarget.id, value);
       onCancelEdit();
@@ -401,7 +406,13 @@ export function ChatComposer({
             ref={areaRef}
             rows={1}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              const value = e.target.value;
+              setText(value);
+              setTyping(conversationId, Boolean(value.trim()));
+              if (typingTimerRef.current !== null) window.clearTimeout(typingTimerRef.current);
+              if (value.trim()) typingTimerRef.current = window.setTimeout(() => setTyping(conversationId, false), 1600);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();

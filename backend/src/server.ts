@@ -4,7 +4,7 @@ import { Server, type Socket } from 'socket.io';
 import { app } from './app.js';
 import { connectDatabase } from './config/database.js';
 import { env } from './config/env.js';
-import { Conversation, Message } from './models/index.js';
+import { Conversation, Message, User } from './models/index.js';
 
 const objectId = /^[a-f\d]{24}$/i;
 const server = http.createServer(app);
@@ -13,12 +13,14 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e6,
 });
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
     if (typeof token !== 'string') throw new Error('Missing token');
     const claims = jwt.verify(token, env.accessSecret) as { sub?: string; role?: string };
     if (!claims.sub || !objectId.test(claims.sub)) throw new Error('Invalid token subject');
+    const user = await User.findById(claims.sub).select('active');
+    if (!user?.active) throw new Error('Account is unavailable');
     socket.data.userId = claims.sub;
     next();
   } catch {
@@ -29,6 +31,13 @@ io.use((socket, next) => {
 io.on('connection', (socket: Socket) => {
   const userId = socket.data.userId as string;
   socket.join(`user:${userId}`);
+  void (async () => {
+    try {
+      const conversations = await Conversation.find({ members: userId }).select('members').lean();
+      const peers = new Set(conversations.flatMap((conversation) => conversation.members.map(String)).filter((id) => id !== userId));
+      for (const id of peers) io.to(`user:${id}`).emit('presence:online', { userId });
+    } catch { /* Presence is best effort. */ }
+  })();
 
   socket.on('conversation:join', async (conversationId: unknown, ack?: (result: { ok: boolean; message?: string }) => void) => {
     if (typeof conversationId !== 'string' || !objectId.test(conversationId)) return ack?.({ ok: false, message: 'Invalid conversation.' });
@@ -86,6 +95,8 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('disconnect', async () => {
     try {
+      const remaining = await io.in(`user:${userId}`).fetchSockets();
+      if (remaining.length) return;
       const conversations = await Conversation.find({ members: userId }).select('members').lean();
       const others = new Set(conversations.flatMap((c) => c.members.map(String)).filter((id) => id !== userId));
       for (const id of others) io.to(`user:${id}`).emit('presence:offline', { userId });

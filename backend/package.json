@@ -10,7 +10,8 @@
     "seed": "tsx src/seeds/institutions.seed.ts",
     "directory:fetch": "node src/seeds/fetch-registry-data.mjs",
     "test": "npm run build && node --test tests/app.test.mjs",
-    "test:integration": "npm run build && node --test tests/auth.integration.mjs"
+    "test:integration": "npm run build && node --test tests/auth.integration.mjs",
+    "test:chat": "npm run build && node --test tests/chat.integration.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
