@@ -62,9 +62,7 @@ export function ProfilePreview({
                   variant="glass"
                   icon={<MessageCircle className="h-4 w-4" />}
                   onClick={() => {
-                    const id = startConversation(user.id);
-                    onClose();
-                    navigate(`/chats/${id}`);
+                    void startConversation(user.id).then((id) => { onClose(); navigate(`/chats/${id}`); }).catch(() => undefined);
                   }}
                 >
                   Message

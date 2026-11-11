@@ -1,4 +1,5 @@
-const BASE = (import.meta as ImportMeta & {env:{VITE_API_BASE_URL?:string}}).env.VITE_API_BASE_URL ?? 'http://localhost:5000/api';
+export const API_BASE_URL = (import.meta as ImportMeta & {env:{VITE_API_BASE_URL?:string}}).env.VITE_API_BASE_URL ?? 'http://localhost:5000/api';
+const BASE = API_BASE_URL;
 let accessToken = sessionStorage.getItem('campuslaugh:access');
 export const setAccessToken=(token:string|null)=>{accessToken=token;if(token)sessionStorage.setItem('campuslaugh:access',token);else sessionStorage.removeItem('campuslaugh:access');window.dispatchEvent(new Event('campuslaugh:session'))};
 export const getAccessToken=()=>accessToken;

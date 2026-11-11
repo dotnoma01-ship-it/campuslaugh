@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import type { Socket } from "socket.io-client";
 import { useSystem } from "@/context/SystemContext";
 import {
   conversations as seedConversations,
@@ -13,6 +14,7 @@ import type { AppNotification, Comment, Conversation, Message, Post, User, Wallp
 import { uid } from "@/utils/format";
 import { getAccessToken, request } from "@/services/http";
 import { backend } from "@/services/backend";
+import { connectChatSocket } from "@/services/chatSocket";
 
 interface NewMessageInput {
   kind?: Message["kind"];
@@ -75,7 +77,7 @@ interface StoreCtx {
   toggleMute: (conversationId: string) => void;
   toggleArchive: (conversationId: string) => void;
   setWallpaper: (conversationId: string, w: WallpaperId) => void;
-  startConversation: (userId: string) => string;
+  startConversation: (userId: string) => Promise<string>;
   forwardMessage: (conversationId: string, message: Message) => void;
 
   /* notifications */
@@ -103,6 +105,7 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
   const [remotePosts, setRemotePosts] = useState<Post[] | null>(null);
   const [remoteUsers, setRemoteUsers] = useState<Record<string, User>>({});
   const [apiUserId, setApiUserId] = useState<string | null>(null);
+  const [chatSocket, setChatSocket] = useState<Socket | null>(null);
   const [conversations, setConversations] = usePersistentState<Conversation[]>("campuslaugh:chats:v2", seedConversations);
   const [notifications, setNotifications] = usePersistentState<AppNotification[]>("campuslaugh:notifs:v2", seedNotifications);
   const [me, setMe] = usePersistentState<User>("campuslaugh:me:v2", userDb[ME]);
@@ -159,6 +162,53 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
     });
     return () => { live = false; };
   }, [apiUserId, setNotifications, system.toast]);
+
+  useEffect(() => {
+    if (!apiUserId) return;
+    let live = true;
+    void backend.getConversations().then((items) => { if (live) { setConversations(items); setRemoteUsers((previous) => ({ ...previous, ...Object.fromEntries(backend.getConversationUsers().map((user) => [user.id, user])) })); } }).catch(() => {
+      if (live) system.toast({ title: "Could not load conversations", description: "Try again when the connection is available.", tone: "error" });
+    });
+    const socket = connectChatSocket();
+    if (!socket) return () => { live = false; };
+    setChatSocket(socket);
+    socket.on("message:new", (raw: unknown) => {
+      const candidate = raw as { _id?: string; conversationId?: string; senderId?: string | { _id?: string } };
+      if (!candidate?._id || !candidate.conversationId) return;
+      const message = backend.mapMessage(raw, candidate.conversationId);
+      setConversations((previous) => previous.map((conversation) => conversation.id !== candidate.conversationId ? conversation : {
+        ...conversation,
+        messages: conversation.messages.some((entry) => entry.id === message.id) ? conversation.messages : [...conversation.messages, message],
+        unread: message.mine ? conversation.unread : conversation.unread + 1,
+      }));
+    });
+    socket.on("typing", (payload: { conversationId?: string; active?: boolean }) => {
+      if (!payload.conversationId || typeof payload.active !== "boolean") return;
+      setConversations((previous) => previous.map((conversation) => conversation.id === payload.conversationId ? { ...conversation, typing: payload.active } : conversation));
+    });
+    socket.on("message:read", (payload: { conversationId?: string; messageId?: string; userId?: string }) => {
+      if (!payload.conversationId || !payload.messageId) return;
+      setConversations((previous) => previous.map((conversation) => conversation.id !== payload.conversationId ? conversation : {
+        ...conversation,
+        messages: conversation.messages.map((message) => message.id === payload.messageId ? { ...message, status: "read" } : message),
+      }));
+    });
+    socket.on("connect", () => {
+      void backend.getConversations().then((items) => {
+        if (!live) return;
+        setRemoteUsers((previous) => ({ ...previous, ...Object.fromEntries(backend.getConversationUsers().map((user) => [user.id, user])) }));
+        items.forEach((conversation) => socket.emit("conversation:join", conversation.id));
+      }).catch(() => undefined);
+    });
+    return () => { live = false; socket.disconnect(); setChatSocket(null); };
+  }, [apiUserId, setConversations, system.toast]);
+
+  useEffect(() => {
+    if (!chatSocket?.connected) return;
+    conversations.forEach((conversation) => {
+      if (isObjectId(conversation.id)) chatSocket.emit("conversation:join", conversation.id);
+    });
+  }, [chatSocket, conversations]);
 
   const userById = useCallback((id: string) => id === ME || id === me.id ? me : remoteUsers[id] ?? userDb[id] ?? me, [me, remoteUsers]);
   const setRemoteFeed = useCallback((items: Post[], users: User[]) => {
@@ -496,6 +546,38 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
 
   const sendMessage = useCallback<StoreCtx["sendMessage"]>(
     (conversationId, input) => {
+      if (apiUserId && isObjectId(conversationId)) {
+        if ((input.kind ?? "text") !== "text" || !input.text?.trim()) {
+          system.toast({ title: "Attachment sending is unavailable", description: "Media upload support is not connected to chat yet.", tone: "warning" });
+          return;
+        }
+        const id = uid("pending");
+        const optimistic: Message = { id, conversationId, authorId: ME, kind: "text", text: input.text.trim(), replyTo: input.replyTo, createdAt: Date.now(), mine: true, status: "sending" };
+        patchConv(conversationId, (conversation) => ({ ...conversation, messages: [...conversation.messages, optimistic] }));
+        const finish = (raw: unknown) => {
+          const message = backend.mapMessage(raw, conversationId);
+          patchConv(conversationId, (conversation) => {
+            const withoutPending = conversation.messages.filter((item) => item.id !== id);
+            return { ...conversation, messages: withoutPending.some((item) => item.id === message.id) ? withoutPending : [...withoutPending, message] };
+          });
+          system.playSound("send");
+        };
+        if (chatSocket) {
+          chatSocket.emit("message:send", { conversationId, text: input.text.trim(), replyTo: input.replyTo?.id }, (result: { message?: unknown; error?: string }) => {
+            if (result?.message) finish(result.message);
+            else {
+              patchConv(conversationId, (conversation) => ({ ...conversation, messages: conversation.messages.filter((item) => item.id !== id) }));
+              system.toast({ title: "Message wasn’t sent", description: result?.error ?? "Reconnect and try again.", tone: "error" });
+            }
+          });
+        } else {
+          void backend.sendMessage(conversationId, input.text.trim(), input.replyTo?.id).then(finish).catch((error) => {
+            patchConv(conversationId, (conversation) => ({ ...conversation, messages: conversation.messages.filter((item) => item.id !== id) }));
+            system.toast({ title: "Message wasn’t sent", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+          });
+        }
+        return;
+      }
       const id = uid("m");
       const message: Message = {
         id,
@@ -518,7 +600,7 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
       deliverLater(conversationId, id);
       if (Math.random() > 0.25) simulateReply(conversationId);
     },
-    [patchConv, system, deliverLater, simulateReply],
+    [patchConv, system, deliverLater, simulateReply, apiUserId, chatSocket],
   );
 
   const editMessage = useCallback<StoreCtx["editMessage"]>(
@@ -527,9 +609,10 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         ...c,
         messages: c.messages.map((m) => (m.id === messageId ? { ...m, text, edited: true } : m)),
       }));
+      if (isObjectId(messageId) && apiUserId) void request(`/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ text }) }).catch((error) => system.toast({ title: "Message edit wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
       system.toast({ title: "Message updated", tone: "success" });
     },
-    [patchConv, system],
+    [patchConv, apiUserId, system],
   );
 
   const deleteMessage = useCallback<StoreCtx["deleteMessage"]>(
@@ -538,9 +621,10 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         ...c,
         messages: c.messages.map((m) => (m.id === messageId ? { ...m, deleted: true, text: "This message was deleted", media: undefined, reactions: [] } : m)),
       }));
+      if (isObjectId(messageId) && apiUserId) void request(`/messages/${messageId}`, { method: "DELETE" }).catch((error) => system.toast({ title: "Message deletion wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
       system.toast({ title: "Message deleted", tone: "warning" });
     },
-    [patchConv, system],
+    [patchConv, apiUserId, system],
   );
 
   const reactMessage = useCallback<StoreCtx["reactMessage"]>(
@@ -562,18 +646,19 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
           return { ...m, reactions: next };
         }),
       }));
+      if (isObjectId(messageId) && apiUserId) void request(`/messages/${messageId}/reactions`, { method: "POST", body: JSON.stringify({ emoji }) }).catch((error) => system.toast({ title: "Reaction wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
       system.haptic(4);
     },
-    [patchConv, system],
+    [patchConv, apiUserId, system],
   );
 
   const togglePin = useCallback(
-    (conversationId: string) => patchConv(conversationId, (c) => ({ ...c, pinned: !c.pinned })),
-    [patchConv],
+    (conversationId: string) => { const pinned = !conversations.find((c) => c.id === conversationId)?.pinned; patchConv(conversationId, (c) => ({ ...c, pinned })); if (isObjectId(conversationId) && apiUserId) void request(`/conversations/${conversationId}/settings`, { method: "PATCH", body: JSON.stringify({ pinned }) }).catch((error) => system.toast({ title: "Pin setting wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" })); },
+    [patchConv, conversations, apiUserId, system],
   );
   const toggleMute = useCallback(
-    (conversationId: string) => patchConv(conversationId, (c) => ({ ...c, muted: !c.muted })),
-    [patchConv],
+    (conversationId: string) => { const muted = !conversations.find((c) => c.id === conversationId)?.muted; patchConv(conversationId, (c) => ({ ...c, muted })); if (isObjectId(conversationId) && apiUserId) void request(`/conversations/${conversationId}/settings`, { method: "PATCH", body: JSON.stringify({ muted }) }).catch((error) => system.toast({ title: "Mute setting wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" })); },
+    [patchConv, conversations, apiUserId, system],
   );
   const toggleArchive = useCallback(
     (conversationId: string) => {
@@ -582,9 +667,10 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         archived = !c.archived;
         return { ...c, archived };
       });
+      if (isObjectId(conversationId) && apiUserId) void request(`/conversations/${conversationId}/settings`, { method: "PATCH", body: JSON.stringify({ archived }) }).catch((error) => system.toast({ title: "Archive setting wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
       system.toast({ title: archived ? "Conversation archived" : "Restored to inbox", tone: "info" });
     },
-    [patchConv, system],
+    [patchConv, apiUserId, system],
   );
   const setWallpaper = useCallback<StoreCtx["setWallpaper"]>(
     (conversationId, w) => patchConv(conversationId, (c) => ({ ...c, wallpaper: w })),
@@ -593,10 +679,12 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
 
   const markConversationRead = useCallback<StoreCtx["markConversationRead"]>(
     (conversationId) => {
+      const conversation = conversations.find((item) => item.id === conversationId);
       patchConv(conversationId, (c) => ({ ...c, unread: 0 }));
       setNotifications((prev) => prev.map((n) => (n.conversationId === conversationId ? { ...n, read: true } : n)));
+      if (chatSocket && conversation) conversation.messages.filter((message) => !message.mine && isObjectId(message.id)).forEach((message) => chatSocket.emit("message:read", { conversationId, messageId: message.id }));
     },
-    [patchConv, setNotifications],
+    [patchConv, setNotifications, conversations, chatSocket],
   );
 
   const startConversation = useCallback<StoreCtx["startConversation"]>(
@@ -604,14 +692,20 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
       const existing = conversations.find((c) => !c.group && c.participantIds[0] === userId);
       if (existing) {
         setConversations((prev) => prev.map((c) => (c.id === existing.id ? { ...c, archived: false } : c)));
-        return existing.id;
+        return Promise.resolve(existing.id);
       }
+      if (apiUserId && isObjectId(userId)) return backend.createConversation(userId).then(({ conversation }) => {
+        const id = conversation._id;
+        const created: Conversation = { id, participantIds: [userId], messages: [], unread: 0, wallpaper: "midnight" };
+        setConversations((prev) => [created, ...prev.filter((item) => item.id !== id)]);
+        return id;
+      }).catch((error) => { system.toast({ title: "Could not start conversation", description: error instanceof Error ? error.message : "Try again.", tone: "error" }); throw error; });
       const id = uid("cv");
       const conv: Conversation = { id, participantIds: [userId], messages: [], unread: 0, wallpaper: "midnight" };
       setConversations((prev) => [conv, ...prev]);
-      return id;
+      return Promise.resolve(id);
     },
-    [conversations, setConversations],
+    [conversations, setConversations, apiUserId, system],
   );
 
   const forwardMessage = useCallback<StoreCtx["forwardMessage"]>(

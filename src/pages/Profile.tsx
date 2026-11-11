@@ -112,7 +112,7 @@ export default function Profile() {
         <div className="grain absolute inset-0 opacity-20 mix-blend-overlay" />
         <div className="absolute right-3 top-3 flex gap-1.5">
           {!isMe && (
-            <IconButton label="Message" onClick={() => navigate(`/chats/${startConversation(user.id)}`)}>
+            <IconButton label="Message" onClick={() => { void startConversation(user.id).then((id) => navigate(`/chats/${id}`)).catch(() => undefined); }}>
               <MessageCircle className="h-4 w-4" />
             </IconButton>
           )}
@@ -196,7 +196,7 @@ export default function Profile() {
                   variant="glass"
                   size="sm"
                   icon={<MessageCircle className="h-4 w-4" />}
-                  onClick={() => navigate(`/chats/${startConversation(user.id)}`)}
+                  onClick={() => { void startConversation(user.id).then((id) => navigate(`/chats/${id}`)).catch(() => undefined); }}
                 >
                   Message
                 </Button>
@@ -382,7 +382,7 @@ export default function Profile() {
               ]
             : [
                 { id: "share", label: "Copy profile link", icon: <Link2 className="h-4 w-4" />, onSelect: () => void copyProfileLink() },
-                { id: "msg", label: "Send message", icon: <MessageCircle className="h-4 w-4" />, onSelect: () => navigate(`/chats/${startConversation(user.id)}`) },
+                { id: "msg", label: "Send message", icon: <MessageCircle className="h-4 w-4" />, onSelect: () => { void startConversation(user.id).then((id) => navigate(`/chats/${id}`)).catch(() => undefined); } },
                 { id: "mute", label: `Mute @${user.username}`, icon: <ShieldAlert className="h-4 w-4" />, onSelect: () => toast({ title: `Muted ${user.name}`, description: "Manage in Settings → Safety", tone: "info" }) },
                 {
                   id: "block",

@@ -131,9 +131,10 @@ function ShareSheet({
                     sendMessage(t.id, { kind: "text", text: `Check this out 👀 ${link}` });
                     toast({ title: `Sent to ${t.label}`, tone: "success" });
                   } else {
-                    const convId = startConversation(t.id);
-                    sendMessage(convId, { kind: "text", text: `Check this out 👀 ${link}` });
-                    toast({ title: `Sent to ${t.label}`, tone: "success" });
+                    void startConversation(t.id).then((convId) => {
+                      sendMessage(convId, { kind: "text", text: `Check this out 👀 ${link}` });
+                      toast({ title: `Sent to ${t.label}`, tone: "success" });
+                    }).catch(() => undefined);
                   }
                   onClose();
                 }}

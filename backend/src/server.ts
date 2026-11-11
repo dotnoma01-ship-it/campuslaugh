@@ -54,12 +54,13 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('message:send', async (payload: unknown, ack?: (result: { message?: unknown; error?: string }) => void) => {
     if (!payload || typeof payload !== 'object') return ack?.({ error: 'Invalid message.' });
-    const { conversationId, text } = payload as { conversationId?: unknown; text?: unknown };
+    const { conversationId, text, replyTo } = payload as { conversationId?: unknown; text?: unknown; replyTo?: unknown };
     if (typeof conversationId !== 'string' || !objectId.test(conversationId) || typeof text !== 'string' || !text.trim() || text.length > 10_000) return ack?.({ error: 'Message text is required and must be under 10,000 characters.' });
     try {
       const conversation = await Conversation.findOne({ _id: conversationId, members: userId });
       if (!conversation) return ack?.({ error: 'Conversation access denied.' });
-      const message = await Message.create({ conversationId: conversation._id, senderId: userId, text: text.trim() });
+      if (replyTo !== undefined && (typeof replyTo !== 'string' || !objectId.test(replyTo) || !await Message.exists({ _id: replyTo, conversationId: conversation._id }))) return ack?.({ error: 'Reply target is unavailable.' });
+      const message = await Message.create({ conversationId: conversation._id, senderId: userId, text: text.trim(), ...(replyTo ? { replyTo } : {}) });
       conversation.lastMessageAt = new Date();
       await conversation.save();
       io.to(`conversation:${conversationId}`).emit('message:new', message);
@@ -78,7 +79,7 @@ io.on('connection', (socket: Socket) => {
       if (!member) return ack?.({ ok: false });
       const updated = await Message.findOneAndUpdate({ _id: messageId, conversationId }, { $addToSet: { readBy: userId } }, { new: true }).select('_id');
       if (!updated) return ack?.({ ok: false });
-      socket.to(`conversation:${conversationId}`).emit('message:read', { messageId, userId });
+      socket.to(`conversation:${conversationId}`).emit('message:read', { conversationId, messageId, userId });
       ack?.({ ok: true });
     } catch { ack?.({ ok: false }); }
   });

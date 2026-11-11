@@ -365,10 +365,11 @@ export function ChatInbox() {
                 transition={{ delay: i * 0.025 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => {
-                  const id = startConversation(u.id);
-                  setNewOpen(false);
-                  savedScroll = listRef.current?.scrollTop ?? 0;
-                  navigate(`/chats/${id}`);
+                  void startConversation(u.id).then((id) => {
+                    setNewOpen(false);
+                    savedScroll = listRef.current?.scrollTop ?? 0;
+                    navigate(`/chats/${id}`);
+                  }).catch(() => undefined);
                 }}
                 className="flex w-full items-center gap-3 rounded-2xl p-2 text-left hover:bg-ink/6"
               >

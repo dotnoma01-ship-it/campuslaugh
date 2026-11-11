@@ -9,7 +9,7 @@ Base URL: `http://localhost:5000/api`. Authenticated routes accept `Authorizatio
 | Institutions | `GET /institutions?q=&category=&ownership=&state=&page=&limit=`; `/search`; `/states`; `/categories`; `GET /institutions/:id` |
 | Users | `GET /users/search?q=`, `/users/:id`, `/users/me`; `PATCH /users/me`; `POST /users/:id/follow`, `/block`; `DELETE /users/:id/block` |
 | Posts and comments | `GET/POST /posts`; `PATCH/DELETE /posts/:id`; `POST /posts/:id/like`, `/repost`, `/hide`, `/bookmark`; `GET /users/me/bookmarks`; `GET/POST /posts/:id/comments`; `PATCH/DELETE /comments/:id`; `POST /comments/:id/like` |
-| Conversations | `GET/POST /conversations`; `GET/POST /conversations/:id/messages` |
+| Conversations and messages | `GET/POST /conversations`; `PATCH /conversations/:id/settings`; `GET/POST /conversations/:id/messages`; `PATCH/DELETE /messages/:id`; `POST /messages/:id/reactions`; authenticated Socket.IO events `conversation:join`, `message:send`, `message:new`, `message:read`, `typing` |
 | Notifications | `GET /notifications?page=&limit=`, `/notifications/unread-count`; `PATCH /notifications/read-all`, `/:id/read`; `DELETE /notifications`, `/:id` |
 | Discovery | `GET /search?q=`; `/hashtags/trending`; `/hashtags/:name/posts` |
 | Moderation/admin | `POST /reports`; admin `GET/PATCH /reports`; public `GET /announcements`; admin `POST/PATCH/DELETE /announcements` |
