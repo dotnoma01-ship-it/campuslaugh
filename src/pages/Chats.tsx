@@ -47,7 +47,7 @@ export default function Chats() {
               className="max-w-sm border-0 bg-transparent"
               icon={<MessageCircle className="h-6 w-6" />}
               title="Pick a conversation"
-              body="Select a chat on the left — or start a new one. Messages stay on this device for the demo."
+              body="Select a conversation on the left or start a new one. Messages are saved to your account."
               action={
                 <Button variant="brand" size="sm" onClick={() => navigate("/chats")}>
                   Open inbox

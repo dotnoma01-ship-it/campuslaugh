@@ -21,7 +21,7 @@ export function VoiceNote({ message }: { message: Message }) {
   const [progress, setProgress] = useState(0);
   const timer = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const duration = message.duration ?? 12;
+  const duration = message.duration ?? 0;
 
   useEffect(() => {
     if (message.media?.src) {
@@ -57,22 +57,7 @@ export function VoiceNote({ message }: { message: Message }) {
       }
       return;
     }
-    /* no real audio (demo voice note) — animate a synthetic waveform */
-    if (playing) {
-      setPlaying(false);
-      if (timer.current) window.clearInterval(timer.current);
-      return;
-    }
-    setPlaying(true);
-    const started = Date.now() - progress * duration * 1000;
-    timer.current = window.setInterval(() => {
-      const p = (Date.now() - started) / (duration * 1000);
-      if (p >= 1) {
-        setProgress(0);
-        setPlaying(false);
-        if (timer.current) window.clearInterval(timer.current);
-      } else setProgress(p);
-    }, 90);
+    return;
   };
 
   const bars = 26;
@@ -83,7 +68,8 @@ export function VoiceNote({ message }: { message: Message }) {
       <motion.button
         whileTap={{ scale: 0.88 }}
         onClick={toggle}
-        aria-label={playing ? "Pause voice message" : "Play voice message"}
+        disabled={!message.media?.src}
+        aria-label={!message.media?.src ? "Voice message unavailable" : playing ? "Pause voice message" : "Play voice message"}
         className={cn(
           "grid h-9 w-9 shrink-0 place-items-center rounded-full",
           message.mine ? "bg-onbrand/85 text-brand" : "bg-brand text-onbrand",
@@ -91,26 +77,15 @@ export function VoiceNote({ message }: { message: Message }) {
       >
         {playing ? <Pause className="h-4 w-4" /> : <Play className="ml-0.5 h-4 w-4" fill="currentColor" />}
       </motion.button>
-      <div className="flex h-8 flex-1 items-center gap-[2.5px]">
+      {message.media?.src ? <div className="flex h-8 flex-1 items-center gap-[2.5px]">
         {Array.from({ length: bars }).map((_, i) => {
           const active = i / bars <= progress;
           const h = 6 + Math.abs(Math.sin((i + seed) * 1.7)) * 20;
-          return (
-            <motion.span
-              key={i}
-              animate={playing && active ? { scaleY: [1, 1.28, 0.86, 1] } : { scaleY: 1 }}
-              transition={{ duration: 0.7, repeat: playing && active ? Infinity : 0, delay: i * 0.02 }}
-              className={cn(
-                "w-[3px] origin-center rounded-full transition-colors duration-200",
-                active ? (message.mine ? "bg-onbrand" : "bg-brand") : message.mine ? "bg-onbrand/28" : "bg-ink/22",
-              )}
-              style={{ height: h }}
-            />
-          );
+          return <motion.span key={i} animate={playing && active ? { scaleY: [1, 1.28, 0.86, 1] } : { scaleY: 1 }} transition={{ duration: 0.7, repeat: playing && active ? Infinity : 0, delay: i * 0.02 }} className={cn("w-[3px] origin-center rounded-full transition-colors duration-200", active ? (message.mine ? "bg-onbrand" : "bg-brand") : message.mine ? "bg-onbrand/28" : "bg-ink/22")} style={{ height: h }} />;
         })}
-      </div>
+      </div> : <span className="flex-1 text-[11px] font-semibold opacity-70">Voice message unavailable</span>}
       <span className="shrink-0 text-[11px] font-bold tabular-nums opacity-70">
-        {mmss(playing || progress ? progress * duration : duration)}
+        {message.media?.src ? mmss(playing || progress ? progress * duration : duration) : "—"}
       </span>
     </div>
   );

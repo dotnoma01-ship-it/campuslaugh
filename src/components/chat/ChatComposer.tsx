@@ -1,26 +1,24 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  Camera,
   CornerDownRight,
   FileText,
   Image as ImageIcon,
-  MapPin,
   Mic,
   Send,
   Smile,
-  Trash2,
   Video,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/context/StoreContext";
 import { useSystem } from "@/context/SystemContext";
-import { emojiGroups, quickReplies } from "@/data/mock";
+import { emojiGroups } from "@/data/constants";
 import type { Message } from "@/types";
-import { cn, mmss, uid } from "@/utils/format";
+import { cn } from "@/utils/format";
 import { Avatar } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/overlays";
 import { spring, springSnappy } from "@/components/ui/primitives";
+import { uploadMedia } from "@/services/upload";
 
 const EMOJI_RECENTS = emojiGroups[0]!.emojis;
 
@@ -30,30 +28,21 @@ export function ChatComposer({
   onCancelReply,
   editTarget,
   onCancelEdit,
-  onPickMedia,
 }: {
   conversationId: string;
   replyTo: Message | null;
   onCancelReply: () => void;
   editTarget: Message | null;
   onCancelEdit: () => void;
-  onPickMedia: (item: Message) => void;
 }) {
   const { sendMessage, editMessage, setTyping, userById, me } = useStore();
-  const { toast, haptic, showIsland } = useSystem();
+  const { toast } = useSystem();
   const [text, setText] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
-  const [recording, setRecording] = useState(false);
-  const [recordSeconds, setRecordSeconds] = useState(0);
-  const [levels, setLevels] = useState<number[]>(Array(24).fill(0.15));
+  const [uploading, setUploading] = useState(false);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const analyserRef = useRef<number | null>(null);
-  const tickRef = useRef<number | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const typingTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -97,144 +86,30 @@ export function ChatComposer({
     if (areaRef.current) areaRef.current.style.height = "0px";
   };
 
-  /* ---------------------------- voice notes --------------------------- */
-
-  const stopAnalyser = () => {
-    if (analyserRef.current) window.clearInterval(analyserRef.current);
-    analyserRef.current = null;
-  };
-
-  const startRecording = async () => {
-    setRecordSeconds(0);
-    chunksRef.current = [];
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error("unsupported");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const rec = new MediaRecorder(stream);
-      recorderRef.current = rec;
-      rec.ondataavailable = (e) => e.data.size && chunksRef.current.push(e.data);
-      rec.start();
-      setRecording(true);
-      haptic([12, 40, 12]);
-      showIsland({ title: "Recording voice note", subtitle: "Tap the mic again or press send when you're done", duration: 3200 });
-
-      const ctx = new AudioContext();
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 64;
-      source.connect(analyser);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      analyserRef.current = window.setInterval(() => {
-        analyser.getByteFrequencyData(data);
-        setLevels(Array.from({ length: 24 }, (_, i) => 0.14 + (data[i % data.length]! / 255) * 0.86));
-      }, 90);
-      tickRef.current = window.setInterval(() => setRecordSeconds((s) => s + 1), 1000);
-    } catch {
-      setRecording(false);
-      stopAnalyser();
-      toast({
-        title: "Microphone unavailable",
-        description: "Permission denied or unsupported — sending a demo voice note instead.",
-        tone: "warning",
-        actionLabel: "Send demo",
-        onAction: () => sendDemoVoice(7),
-      });
-    }
-  };
-
-  const cleanupStream = () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    if (tickRef.current) window.clearInterval(tickRef.current);
-    tickRef.current = null;
-    stopAnalyser();
-    setLevels(Array(24).fill(0.15));
-  };
-
-  const finishRecording = (sendIt: boolean) => {
-    const rec = recorderRef.current;
-    const seconds = Math.max(1, recordSeconds);
-    if (rec && rec.state !== "inactive") {
-      rec.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: rec.mimeType || "audio/webm" });
-        cleanupStream();
-        recorderRef.current = null;
-        setRecording(false);
-        if (sendIt && blob.size > 0) {
-          sendMessage(conversationId, {
-            kind: "voice",
-            text: "Voice message",
-            duration: seconds,
-            media: { id: uid("v"), kind: "image", src: URL.createObjectURL(blob), alt: "Voice note" },
-          });
-        } else if (sendIt) {
-          sendDemoVoice(seconds);
-        }
-      };
-      rec.stop();
-    } else {
-      cleanupStream();
-      setRecording(false);
-      if (sendIt) sendDemoVoice(seconds);
-    }
-  };
-
-  const sendDemoVoice = (seconds: number) => {
-    sendMessage(conversationId, { kind: "voice", text: "Voice message", duration: Math.max(3, seconds) });
-  };
-
   /* ---------------------------- attachments --------------------------- */
 
-  const onFiles = (files: FileList | null) => {
+  const onFiles = async (files: FileList | null) => {
     if (!files?.length) return;
-    Array.from(files)
-      .slice(0, 4)
-      .forEach((f) => {
-        const isVideo = f.type.startsWith("video");
-        const item: Message = {
-          id: uid("m"),
-          conversationId,
-          authorId: "me",
-          kind: isVideo ? "video" : "image",
-          createdAt: Date.now(),
-          mine: true,
-          status: "sending",
-          media: {
-            id: uid("md"),
-            kind: isVideo ? "video" : "image",
-            src: URL.createObjectURL(f),
-            alt: f.name,
-          },
-          text: undefined,
-        };
-        onPickMedia(item);
-      });
+    const selected = Array.from(files).slice(0, 10);
+    setUploading(true);
+    try {
+      const uploaded = await Promise.all(selected.map((file) => uploadMedia(file, undefined, { context: "chat", conversationId })));
+      sendMessage(conversationId, { attachmentIds: uploaded.map((asset) => asset.publicId), text: text.trim() || undefined });
+      setText("");
+      toast({ title: `${uploaded.length} attachment${uploaded.length === 1 ? "" : "s"} sent`, tone: "success" });
+    } catch (error) {
+      toast({ title: "Attachment wasn’t sent", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+    } finally {
+      setUploading(false);
+    }
   };
 
   const attachOptions = useMemo(
     () => [
       { id: "photo", label: "Photos", icon: <ImageIcon className="h-5 w-5" />, tone: "bg-brand/16 text-brand", action: () => fileRef.current?.click() },
       { id: "video", label: "Videos", icon: <Video className="h-5 w-5" />, tone: "bg-sky2/16 text-sky2", action: () => fileRef.current?.click() },
-      { id: "camera", label: "Camera", icon: <Camera className="h-5 w-5" />, tone: "bg-coral/16 text-coral", action: () => toast({ title: "Camera (demo)", description: "A real build would open the device camera here.", tone: "info" }) },
-      {
-        id: "doc",
-        label: "Document",
-        icon: <FileText className="h-5 w-5" />,
-        tone: "bg-mint/16 text-mint",
-        action: () => {
-          sendMessage(conversationId, {
-            kind: "document",
-            fileName: "Lecture-Notes-Week-9.pdf",
-            fileSize: "1.8 MB",
-            text: "Document",
-          });
-          toast({ title: "Document sent (demo asset)", tone: "success" });
-        },
-      },
-      { id: "loc", label: "Location", icon: <MapPin className="h-5 w-5" />, tone: "bg-[#ffcb5c]/16 text-[#ffcb5c]", action: () => toast({ title: "Location sharing coming soon", description: "Future-ready control — not wired to maps yet.", tone: "info" }) },
     ],
-    [conversationId, sendMessage, toast],
+    [],
   );
 
   return (
@@ -242,7 +117,7 @@ export function ChatComposer({
       <input
         ref={fileRef}
         type="file"
-        accept="image/*,video/*"
+        accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"
         multiple
         hidden
         onChange={(e) => {
@@ -303,17 +178,6 @@ export function ChatComposer({
               transition={spring}
               className="glass-solid absolute inset-x-2 bottom-full z-30 mb-2 max-h-[46vh] overflow-y-auto thin-scrollbar rounded-[24px] p-3 lg:left-0 lg:right-auto lg:w-[380px]"
             >
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {quickReplies.map((q) => (
-                  <button
-                    key={q}
-                    onClick={() => setText((t) => `${t}${t ? " " : ""}${q}`)}
-                    className="press rounded-full border border-line bg-glass px-2.5 py-1 text-[12px] font-bold text-ink2 hover:text-ink"
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
               {emojiGroups.map((g) => (
                 <div key={g.label} className="mb-2">
                   <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-ink3">{g.label}</p>
@@ -342,54 +206,8 @@ export function ChatComposer({
           )}
         </AnimatePresence>
 
-        {/* recording bar */}
-        <AnimatePresence>
-          {recording && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              transition={spring}
-              className="glass-solid absolute inset-x-2 bottom-0 z-30 flex items-center gap-3 rounded-[24px] p-3 lg:left-0 lg:right-0"
-            >
-              <motion.button
-                whileTap={{ scale: 0.9 }}
-                onClick={() => finishRecording(false)}
-                aria-label="Cancel recording"
-                className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-coral/16 text-coral"
-              >
-                <Trash2 className="h-4 w-4" />
-              </motion.button>
-              <div className="flex h-10 flex-1 items-center gap-[3px] overflow-hidden">
-                {levels.map((l, i) => (
-                  <motion.span
-                    key={i}
-                    animate={{ height: `${Math.max(6, l * 34)}px` }}
-                    transition={{ duration: 0.12 }}
-                    className="w-[3px] shrink-0 rounded-full bg-brand"
-                  />
-                ))}
-              </div>
-              <span className="shrink-0 text-[13px] font-extrabold tabular-nums text-brand">{mmss(recordSeconds)}</span>
-              <motion.span
-                animate={{ opacity: [1, 0.25, 1] }}
-                transition={{ duration: 1.2, repeat: Infinity }}
-                className="h-2.5 w-2.5 shrink-0 rounded-full bg-coral"
-              />
-              <motion.button
-                whileTap={{ scale: 0.9 }}
-                onClick={() => finishRecording(true)}
-                aria-label="Send voice note"
-                className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-brand text-onbrand"
-              >
-                <Send className="h-[18px] w-[18px]" />
-              </motion.button>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
         {/* composer row */}
-        <div className={cn("glass-bar flex items-end gap-1.5 rounded-[26px] p-1.5", recording && "opacity-0")}>
+        <div className="glass-bar flex items-end gap-1.5 rounded-[26px] p-1.5">
           <motion.button
             whileTap={{ scale: 0.88 }}
             onClick={() => setEmojiOpen((v) => !v)}
@@ -427,8 +245,9 @@ export function ChatComposer({
           <motion.button
             whileTap={{ scale: 0.88 }}
             onClick={() => setAttachOpen(true)}
+            disabled={uploading}
             aria-label="Attachments"
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-ink2 hover:text-ink"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-ink2 hover:text-ink disabled:opacity-40"
           >
             <svg viewBox="0 0 24 24" className="h-[20px] w-[20px]" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M21.4 11.05 12.3 20.14a5.5 5.5 0 0 1-7.78-7.78l9.1-9.09a3.67 3.67 0 0 1 5.19 5.19l-9.1 9.09a1.83 1.83 0 1 1-2.6-2.59l8.4-8.4" />
@@ -458,8 +277,8 @@ export function ChatComposer({
                 exit={{ scale: 0.5, opacity: 0 }}
                 transition={springSnappy}
                 whileTap={{ scale: 0.86 }}
-                onClick={() => void startRecording()}
-                aria-label="Record voice message"
+                onClick={() => toast({ title: "Voice messages aren’t available yet", description: "Chat media uploads are not connected to the server.", tone: "info" })}
+                aria-label="Voice messages unavailable"
                 className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ink/10 text-ink hover:bg-brand/16 hover:text-brand"
               >
                 <Mic className="h-[19px] w-[19px]" />
@@ -478,7 +297,7 @@ export function ChatComposer({
 
       {/* attachment sheet */}
       <BottomSheet open={attachOpen} onClose={() => setAttachOpen(false)} title="Attach" desktop="center" className="max-h-none">
-        <div className="grid grid-cols-3 gap-3 p-4 sm:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 p-4">
           {attachOptions.map((o, i) => (
             <motion.button
               key={o.id}
@@ -500,7 +319,7 @@ export function ChatComposer({
           ))}
         </div>
         <p className="px-4 pb-4 text-[11.5px] leading-relaxed text-ink3">
-          Files are handled entirely in your browser for this frontend demo — nothing is uploaded to a server.
+          Image and video messages will be available when chat uploads are connected to the server.
         </p>
       </BottomSheet>
     </>

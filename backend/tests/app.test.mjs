@@ -24,7 +24,7 @@ test('health reports server status without requiring MongoDB', async () => {
   const body = await response.json();
   assert.equal(response.status, 200);
   assert.equal(body.success, true);
-  assert.equal(body.data.status, 'ok');
+  assert.equal(body.data.status, 'degraded');
   assert.equal(body.data.mongodb, 'disconnected');
 });
 
@@ -46,7 +46,11 @@ test('registration validates before attempting a database connection', async () 
 });
 
 test('password reset does not claim success when email delivery is unavailable', async () => {
-  const response = await fetch(`${baseUrl}/auth/forgot-password`, { method: 'POST' });
+  const response = await fetch(`${baseUrl}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'person@example.com' }),
+  });
   assert.equal(response.status, 503);
 });
 

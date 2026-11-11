@@ -8,19 +8,19 @@ import {
   MoreVertical,
   Pin,
   Search,
-  Trash2,
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStore } from "@/context/StoreContext";
 import { useSystem } from "@/context/SystemContext";
-import { ME, userArray } from "@/data/mock";
-import type { Conversation } from "@/types";
+import { ME } from "@/data/constants";
+import type { Conversation, User } from "@/types";
 import { cn, clockTime, timeAgo } from "@/utils/format";
 import { Avatar, Button, Chip, EmptyState, IconButton, SearchField } from "@/components/ui/primitives";
 import { BottomSheet, ContextMenu, useContextMenu } from "@/components/ui/overlays";
 import { spring } from "@/components/ui/primitives";
+import { backend } from "@/services/backend";
 
 /** remembers the inbox scroll offset so returning from a chat feels continuous */
 let savedScroll = 0;
@@ -29,19 +29,35 @@ type Filter = "all" | "unread" | "pinned" | "groups" | "archived";
 
 export function ChatInbox() {
   const navigate = useNavigate();
-  const { conversations, userById, togglePin, toggleMute, toggleArchive, markConversationRead, startConversation } = useStore();
-  const { confirm, toast } = useSystem();
+  const { conversations, userById, togglePin, toggleMute, toggleArchive, markConversationRead, startConversation, apiUserId, cacheUser } = useStore();
+  const { toast } = useSystem();
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [newOpen, setNewOpen] = useState(false);
   const [pick, setPick] = useState<string | null>(null);
+  const [newQuery, setNewQuery] = useState("");
+  const [newUsers, setNewUsers] = useState<User[]>([]);
+  const [newUsersLoading, setNewUsersLoading] = useState(false);
   const menu = useContextMenu();
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: savedScroll });
   }, []);
+
+  useEffect(() => {
+    if (!newOpen || !apiUserId) { setNewUsers([]); return; }
+    let live = true;
+    setNewUsersLoading(true);
+    void backend.searchUsers(newQuery).then((users) => {
+      if (!live) return;
+      const available = users.filter((user) => user.id !== apiUserId);
+      available.forEach(cacheUser);
+      setNewUsers(available);
+    }).catch(() => { if (live) setNewUsers([]); }).finally(() => { if (live) setNewUsersLoading(false); });
+    return () => { live = false; };
+  }, [newOpen, newQuery, apiUserId, cacheUser]);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -224,23 +240,6 @@ export function ChatInbox() {
                         icon={c.archived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
                         onClick={() => toggleArchive(c.id)}
                       />
-                      <SwipeAction
-                        tone="danger"
-                        label="Delete"
-                        icon={<Trash2 className="h-4 w-4" />}
-                        onClick={async () => {
-                          const ok = await confirm({
-                            title: `Delete conversation with ${title}?`,
-                            message: "All messages in this demo conversation will be removed from this device.",
-                            confirmLabel: "Delete",
-                            tone: "danger",
-                          });
-                          if (ok) {
-                            toggleArchive(c.id);
-                            toast({ title: "Conversation removed from inbox", tone: "warning" });
-                          }
-                        }}
-                      />
                     </div>
 
                     <motion.button
@@ -339,10 +338,9 @@ export function ChatInbox() {
             : (() => {
                 const c = conversations.find((x) => x.id === pick);
                 if (!c) return [];
-                const title = conversationTitle(c);
                 return [
                   { id: "open", label: "Open chat", icon: <Inbox className="h-4 w-4" />, onSelect: () => openChat(c) },
-                  { id: "read", label: c.unread ? "Mark as read" : "Mark as unread", icon: <CheckCheck className="h-4 w-4" />, onSelect: () => { if (c.unread) markConversationRead(c.id); else toast({ title: `Marked ${title} unread (demo)`, tone: "info" }); } },
+                  ...(c.unread ? [{ id: "read", label: "Mark as read", icon: <CheckCheck className="h-4 w-4" />, onSelect: () => markConversationRead(c.id) }] : []),
                   { id: "pin", label: c.pinned ? "Unpin" : "Pin to top", icon: <Pin className="h-4 w-4" />, onSelect: () => togglePin(c.id) },
                   { id: "mute", label: c.muted ? "Unmute" : "Mute notifications", icon: <BellOff className="h-4 w-4" />, onSelect: () => toggleMute(c.id) },
                   { id: "archive", label: c.archived ? "Restore" : "Archive", icon: c.archived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />, onSelect: () => toggleArchive(c.id) },
@@ -355,8 +353,8 @@ export function ChatInbox() {
       {/* new message picker */}
       <BottomSheet open={newOpen} onClose={() => setNewOpen(false)} title="New message" desktop="panel">
         <div className="space-y-1 p-3">
-          {userArray
-            .filter((u) => u.id !== ME)
+          <div className="px-2 pb-2"><input value={newQuery} onChange={(event) => setNewQuery(event.target.value)} placeholder="Search real CampusLaugh users" className="field h-10 w-full rounded-xl px-3 text-sm" /></div>
+          {newUsersLoading ? <p className="px-3 py-4 text-sm text-ink3">Searching students…</p> : newUsers.length === 0 ? <p className="px-3 py-4 text-sm text-ink3">No students found.</p> : newUsers
             .map((u, i) => (
               <motion.button
                 key={u.id}
@@ -373,14 +371,13 @@ export function ChatInbox() {
                 }}
                 className="flex w-full items-center gap-3 rounded-2xl p-2 text-left hover:bg-ink/6"
               >
-                <Avatar src={u.avatar} name={u.name} size={42} online={u.online} />
+                <Avatar src={u.avatar} name={u.name} size={42} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[14px] font-bold text-ink">{u.name}</span>
                   <span className="block truncate text-[12px] text-ink3">
                     @{u.username} · {u.institution}
                   </span>
                 </span>
-                {u.online && <span className="shrink-0 text-[11px] font-bold text-mint">Online</span>}
               </motion.button>
             ))}
         </div>

@@ -26,15 +26,16 @@ import { useNavigate } from "react-router-dom";
 import { useStore } from "@/context/StoreContext";
 import { useSystem } from "@/context/SystemContext";
 import { useTheme } from "@/context/ThemeContext";
-import { demoReactions, ME, reportReasons } from "@/data/mock";
+import { reactionOptions, ME, reportReasons } from "@/data/constants";
 import type { MediaItem, Message, WallpaperId } from "@/types";
-import { cn, copyText, dayLabel, mmss } from "@/utils/format";
+import { cn, copyText, dayLabel } from "@/utils/format";
 import { Avatar, Badge, Button, IconButton } from "@/components/ui/primitives";
-import { BottomSheet, ContextMenu, Modal, useContextMenu } from "@/components/ui/overlays";
+import { BottomSheet, ContextMenu, useContextMenu } from "@/components/ui/overlays";
 import { springSnappy } from "@/components/ui/primitives";
 import { MessageBubble, TypingBubble } from "./MessageBubble";
 import { ChatComposer } from "./ChatComposer";
 import { MediaViewer } from "@/components/feed/Media";
+import { backend } from "@/services/backend";
 
 const WALLPAPERS: { id: WallpaperId; label: string; css: string; chip: string }[] = [
   {
@@ -80,10 +81,10 @@ export function wallpaperStyle(id: WallpaperId | undefined, resolved: "light" | 
 export function ChatThread({ conversationId }: { conversationId: string }) {
   const navigate = useNavigate();
   const {
-    conversationById, userById, markConversationRead, sendMessage, deleteMessage,
+    conversationById, userById, markConversationRead, deleteMessage,
     reactMessage, forwardMessage, togglePin, toggleMute, toggleArchive, setWallpaper, conversations,
   } = useStore();
-  const { toast, confirm, actionSheet, showIsland, haptic } = useSystem();
+  const { toast, confirm, actionSheet, haptic } = useSystem();
   const { resolved } = useTheme();
 
   const conversation = conversationById(conversationId);
@@ -95,7 +96,6 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
   const [infoOpen, setInfoOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [callState, setCallState] = useState<{ kind: "voice" | "video"; seconds: number } | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const menu = useContextMenu();
   const openedUnread = useRef(conversation?.unread ?? 0);
@@ -108,8 +108,6 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
   useEffect(() => {
     if (!conversation) return;
     markConversationRead(conversation.id);
-    const t = window.setInterval(() => markConversationRead(conversation.id), 2500);
-    return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversation?.id, conversation?.messages.length]);
 
@@ -134,13 +132,6 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 120);
   };
 
-  /* simulated call */
-  useEffect(() => {
-    if (!callState) return;
-    const t = window.setInterval(() => setCallState((c) => (c ? { ...c, seconds: c.seconds + 1 } : c)), 1000);
-    return () => window.clearInterval(t);
-  }, [callState]);
-
   const mediaMessages = useMemo(
     () => (conversation?.messages ?? []).filter((m) => !m.deleted && (m.kind === "image" || m.kind === "video") && m.media),
     [conversation?.messages],
@@ -158,22 +149,14 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
       <div className="grid h-full place-items-center p-6">
         <div className="glass max-w-sm rounded-3xl p-6 text-center">
           <h3 className="text-lg font-extrabold text-ink">Conversation not found</h3>
-          <p className="mt-1.5 text-sm text-ink2">It may have been deleted from this device's demo data.</p>
+          <p className="mt-1.5 text-sm text-ink2">This conversation may no longer be available to your account.</p>
           <Button className="mt-4" variant="brand" onClick={() => navigate("/chats")}>Back to inbox</Button>
         </div>
       </div>
     );
   }
 
-  const startCall = (kind: "voice" | "video") => {
-    setCallState({ kind, seconds: 0 });
-    showIsland({
-      title: `${kind === "voice" ? "Voice" : "Video"} call · ${title}`,
-      subtitle: "Connecting… (frontend demo — no real call is placed)",
-      duration: 3800,
-    });
-    toast({ title: `${kind === "voice" ? "Voice" : "Video"} call started (demo)`, description: "Calls are a future-ready control in this build.", tone: "info" });
-  };
+  const startCall = (kind: "voice" | "video") => toast({ title: `${kind === "voice" ? "Voice" : "Video"} calls aren’t available yet`, tone: "info" });
 
   const openMessageMenu = (pos: { clientX: number; clientY: number }, message: Message) => {
     setMenuMsg(message);
@@ -200,33 +183,19 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
     if (target) forwardMessage(target, message);
   };
 
-  const clearChat = async () => {
-    const ok = await confirm({
-      title: "Clear this conversation?",
-      message: "All messages in this demo thread will be removed from this device.",
-      confirmLabel: "Clear chat",
-      tone: "danger",
-    });
-    if (!ok) return;
-    conversation.messages.forEach((m) => deleteMessage(conversation.id, m.id));
-    toast({ title: "Conversation cleared", tone: "warning" });
-  };
-
   async function reportFlow() {
+    if (!other) return;
     const choice = await actionSheet({
       title: `Report ${title}?`,
-      message: "Reports are queued locally in this frontend demo.",
-      actions: [
-        ...reportReasons.map((r) => ({ id: r, label: r })),
-        { id: "__block", label: `Block ${title}`, tone: "danger" as const },
-      ],
+      message: "Reports are sent to the CampusLaugh moderation queue.",
+      actions: reportReasons.map((r) => ({ id: r, label: r })),
     });
     if (!choice) return;
-    if (choice === "__block") {
-      const ok = await confirm({ title: `Block ${title}?`, message: "They won't be able to message you in this demo session.", confirmLabel: "Block", tone: "danger" });
-      if (ok) toast({ title: `${title} blocked`, description: "Manage this in Settings → Safety", tone: "warning" });
-    } else {
-      toast({ title: "Report submitted", description: choice, tone: "warning" });
+    try {
+      await backend.report("user", other.id, choice);
+      toast({ title: "Report submitted", description: "CampusLaugh moderators will review it.", tone: "success" });
+    } catch (error) {
+      toast({ title: "Could not submit report", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
     }
   }
 
@@ -290,10 +259,10 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
         <IconButton label="Search in conversation" size="sm" onClick={() => setSearchOpen((s) => !s)} active={searchOpen}>
           <Search className="h-4 w-4" />
         </IconButton>
-        <IconButton label="Voice call (demo)" size="sm" onClick={() => startCall("voice")} className="hidden sm:grid">
+        <IconButton label="Voice calls unavailable" size="sm" onClick={() => startCall("voice")} className="hidden sm:grid">
           <Phone className="h-4 w-4" />
         </IconButton>
-        <IconButton label="Video call (demo)" size="sm" onClick={() => startCall("video")} className="hidden sm:grid">
+        <IconButton label="Video calls unavailable" size="sm" onClick={() => startCall("video")} className="hidden sm:grid">
           <VideoIcon className="h-4 w-4" />
         </IconButton>
         <IconButton
@@ -346,7 +315,7 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
               </p>
             </div>
             <span className="glass rounded-full px-3 py-1 text-[11px] font-semibold text-ink3">
-              🔒 End-to-end demo — messages live only on this device
+              Messages are saved to your CampusLaugh account.
             </span>
           </div>
 
@@ -446,13 +415,6 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
           onCancelReply={() => setReplyTo(null)}
           editTarget={editTarget}
           onCancelEdit={() => setEditTarget(null)}
-          onPickMedia={(item) => {
-            sendMessage(conversation.id, {
-              kind: item.kind,
-              media: item.media,
-              text: item.text,
-            });
-          }}
         />
       </div>
 
@@ -470,7 +432,7 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
             <div>
               <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink3">React</p>
               <div className="flex gap-1">
-                {demoReactions.map((e) => (
+                {reactionOptions.map((e) => (
                   <motion.button
                     key={e}
                     whileHover={{ scale: 1.25, y: -2 }}
@@ -499,7 +461,7 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
                   ...(menuMsg.mine
                     ? [
                         { id: "edit", label: "Edit message", icon: <FileText className="h-4 w-4" />, onSelect: () => { setEditTarget(menuMsg); setReplyTo(null); } },
-                        { id: "delete", label: "Delete message", icon: <Trash2 className="h-4 w-4" />, tone: "danger" as const, onSelect: () => { void confirm({ title: "Delete this message?", message: "It will be replaced with a deletion notice for everyone in this demo thread.", confirmLabel: "Delete", tone: "danger" }).then((ok) => ok && deleteMessage(conversation.id, menuMsg.id)); } },
+                        { id: "delete", label: "Delete message", icon: <Trash2 className="h-4 w-4" />, tone: "danger" as const, onSelect: () => { void confirm({ title: "Delete this message?", message: "It will be removed for everyone in this conversation.", confirmLabel: "Delete", tone: "danger" }).then((ok) => ok && deleteMessage(conversation.id, menuMsg.id)); } },
                       ]
                     : []),
                   { id: "forward", label: "Forward…", icon: <Forward className="h-4 w-4" />, onSelect: () => void handleForward(menuMsg) },
@@ -514,7 +476,6 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
                 { id: "pin", label: conversation.pinned ? "Unpin conversation" : "Pin conversation", icon: <Pin className="h-4 w-4" />, onSelect: () => togglePin(conversation.id) },
                 { id: "mute", label: conversation.muted ? "Unmute" : "Mute notifications", icon: <BellOff className="h-4 w-4" />, onSelect: () => toggleMute(conversation.id) },
                 { id: "archive", label: conversation.archived ? "Restore" : "Archive conversation", icon: <Archive className="h-4 w-4" />, onSelect: () => toggleArchive(conversation.id) },
-                { id: "clear", label: "Clear chat", icon: <Trash2 className="h-4 w-4" />, tone: "danger", onSelect: () => void clearChat() },
                 { id: "report", label: "Report or block", icon: <ShieldAlert className="h-4 w-4" />, tone: "danger", onSelect: () => void reportFlow() },
               ]
         }
@@ -575,9 +536,6 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
             <Button variant="outline" size="sm" icon={<Archive className="h-4 w-4" />} onClick={() => { toggleArchive(conversation.id); setInfoOpen(false); navigate("/chats"); }}>
               {conversation.archived ? "Restore" : "Archive"}
             </Button>
-            <Button variant="danger" size="sm" icon={<Trash2 className="h-4 w-4" />} onClick={() => void clearChat()}>
-              Clear chat
-            </Button>
           </div>
 
           {mediaMessages.length > 0 && (
@@ -609,37 +567,6 @@ export function ChatThread({ conversationId }: { conversationId: string }) {
           )}
         </div>
       </BottomSheet>
-
-      {/* active call overlay */}
-      <AnimatePresence>
-        {callState && (
-          <Modal open onClose={() => setCallState(null)} width="max-w-xs">
-            <div className="flex flex-col items-center gap-3 py-2 text-center">
-              <motion.div
-                animate={{ scale: [1, 1.06, 1] }}
-                transition={{ duration: 1.8, repeat: Infinity }}
-              >
-                <Avatar src={other.avatar} name={title} size={84} ring />
-              </motion.div>
-              <div>
-                <p className="text-[15px] font-extrabold text-ink">{title}</p>
-                <p className="text-[12.5px] font-semibold text-brand tabular-nums">
-                  {callState.kind === "voice" ? "Voice call" : "Video call"} · {mmss(callState.seconds)}
-                </p>
-              </div>
-              <p className="max-w-[240px] text-[12px] leading-relaxed text-ink3">
-                Calling is a future-ready control in this frontend build — no audio or video is transmitted.
-              </p>
-              <div className="mt-1 flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => setCallState(null)}>Mute (demo)</Button>
-                <Button variant="danger" size="sm" onClick={() => { toast({ title: "Call ended", description: mmss(callState.seconds), tone: "info" }); setCallState(null); }}>
-                  End call
-                </Button>
-              </div>
-            </div>
-          </Modal>
-        )}
-      </AnimatePresence>
 
       <AnimatePresence>
         {viewer && (

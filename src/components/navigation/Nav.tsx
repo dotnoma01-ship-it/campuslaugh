@@ -19,11 +19,12 @@ import { useSystem } from "@/context/SystemContext";
 import { useStore } from "@/context/StoreContext";
 import { useTheme } from "@/context/ThemeContext";
 import { useScrollDirection } from "@/hooks";
-import { CAMPUS_LAUGH } from "@/data/mock";
+import { CAMPUS_LAUGH } from "@/data/constants";
 import { Avatar, IconButton } from "@/components/ui/primitives";
 import { spring, springSnappy } from "@/components/ui/primitives";
 import { cn } from "@/utils/format";
 import type { ThemeMode } from "@/types";
+import { request, setAccessToken } from "@/services/http";
 
 export function LogoMark({ size = 34 }: { size?: number }) {
   return (
@@ -189,14 +190,19 @@ export function Sidebar() {
             onClick={async () => {
               const ok = await confirm({
                 title: "Log out of CampusLaugh?",
-                message:
-                  "This is a frontend demonstration — your local demo data stays on this device, but the session will be cleared from the interface.",
+                message: "You’ll be signed out of this account on this device.",
                 confirmLabel: "Log out",
                 tone: "danger",
               });
               if (ok) {
-                toast({ title: "Signed out (demo)", description: "Session cleared locally", tone: "info" });
-                navigate("/home");
+                try {
+                  await request("/auth/logout", { method: "POST" });
+                  setAccessToken(null);
+                  toast({ title: "You’re signed out", tone: "success" });
+                  navigate("/login", { replace: true });
+                } catch (error) {
+                  toast({ title: "Could not sign out", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+                }
               }
             }}
             className="press flex w-full items-center gap-2 rounded-2xl px-3 py-2 text-[13px] font-semibold text-ink3 hover:text-coral"
@@ -326,7 +332,6 @@ function TabButton({
 export function MobileHeader({ title }: { title?: string }) {
   const navigate = useNavigate();
   const { me, unreadNotifications } = useStore();
-  const { actionSheet } = useSystem();
   const { direction, y } = useScrollDirection(window, 8);
   const compact = y > 40;
 
@@ -371,18 +376,7 @@ export function MobileHeader({ title }: { title?: string }) {
             <Bell className="h-[17px] w-[17px]" />
           </IconButton>
           <button
-            onClick={() =>
-              actionSheet({
-                title: "Switch campus",
-                message: "Campus selector — demo data. Your feed, trends and announcements follow this campus.",
-                actions: [
-                  { id: "unilag", label: "UNILAG · Akoka", icon: <Home className="h-4 w-4" />, onSelect: () => navigate("/explore") },
-                  { id: "covenant", label: "Covenant · Ota", icon: <Home className="h-4 w-4" />, onSelect: () => navigate("/explore") },
-                  { id: "all", label: "All campuses (pan-African)", icon: <Search className="h-4 w-4" />, onSelect: () => navigate("/explore") },
-                  { id: "settings", label: "Manage campuses", icon: <Settings className="h-4 w-4" />, onSelect: () => navigate("/settings") },
-                ],
-              })
-            }
+            onClick={() => navigate("/profile")}
             aria-label="Your profile"
             className="press ml-0.5"
           >

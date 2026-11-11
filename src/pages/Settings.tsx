@@ -20,9 +20,8 @@ import {
   UserCog,
   Volume2,
   Vibrate,
-  WifiOff,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useStore } from "@/context/StoreContext";
 import { useSystem } from "@/context/SystemContext";
@@ -55,15 +54,68 @@ const WALLPAPERS: { id: WallpaperId; label: string; chip: string }[] = [
   { id: "lime", label: "Lime haze", chip: "linear-gradient(140deg,#d9fb9b,#8fd42c)" },
 ];
 
+type AccountPrivacy = { whoCanMessage: "everyone" | "following" | "campus"; showFollowers: boolean; showFollowing: boolean; showOnlineStatus: boolean; showActivity: boolean; allowPostInteractions: boolean; showReadReceipts: boolean };
+type NotificationPreferences = { likes: boolean; comments: boolean; replies: boolean; followers: boolean; mentions: boolean; reposts: boolean; messages: boolean; announcements: boolean; administrative: boolean };
+type SafetyFollowRequest = { _id: string; requesterId: { _id: string; name: string; username: string; avatar?: string } };
+const defaultAccountPrivacy: AccountPrivacy = { whoCanMessage: "everyone", showFollowers: true, showFollowing: true, showOnlineStatus: true, showActivity: true, allowPostInteractions: true, showReadReceipts: true };
+const defaultNotificationPreferences: NotificationPreferences = { likes: true, comments: true, replies: true, followers: true, mentions: true, reposts: true, messages: true, announcements: true, administrative: true };
+
 export default function SettingsPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const { settings, update, reset, resolved } = useTheme();
-  const { me, conversations, resetDemoData, setAmbient, notifications, pushNotification, markNotificationRead, userById } = useStore();
-  const { toast, confirm, actionSheet, pushBanner, showIsland } = useSystem();
+  const { me, apiUserId, conversations, notifications, posts } = useStore();
+  const { toast, confirm } = useSystem();
+  const [accountSettings, setAccountSettings] = useState({ isPrivate: false, privacy: defaultAccountPrivacy, notificationPreferences: defaultNotificationPreferences });
+  const [accountSettingsLoading, setAccountSettingsLoading] = useState(false);
+  const [accountSettingsSaving, setAccountSettingsSaving] = useState(false);
   const [section, setSection] = useState<SectionId>((params.get("tab") as SectionId) ?? "account");
   const [wallpaperSheet, setWallpaperSheet] = useState(false);
   const [passwordSheet, setPasswordSheet] = useState(false);
+  const [deleteAccountSheet, setDeleteAccountSheet] = useState(false);
+  const [deleteAccountPassword, setDeleteAccountPassword] = useState("");
+  const [deleteAccountConfirmation, setDeleteAccountConfirmation] = useState("");
+  const [deleteAccountBusy, setDeleteAccountBusy] = useState(false);
+  const [blockedUsers, setBlockedUsers] = useState<{ _id: string; name: string; username: string; avatar?: string }[]>([]);
+  const [followRequests, setFollowRequests] = useState<SafetyFollowRequest[]>([]);
+  const [safetyLoading, setSafetyLoading] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    if (!apiUserId) { setAccountSettingsLoading(false); return; }
+    setAccountSettingsLoading(true);
+    void request<{ user: { isPrivate?: boolean; privacy?: Partial<typeof defaultAccountPrivacy>; notificationPreferences?: Partial<typeof defaultNotificationPreferences> } }>("/users/me")
+      .then(({ user }) => { if (live) setAccountSettings({ isPrivate: user.isPrivate ?? false, privacy: { ...defaultAccountPrivacy, ...user.privacy }, notificationPreferences: { ...defaultNotificationPreferences, ...user.notificationPreferences } }); })
+      .catch((error) => { if (live) toast({ title: "Could not load account preferences", description: error instanceof Error ? error.message : "Try again.", tone: "error" }); })
+      .finally(() => { if (live) setAccountSettingsLoading(false); });
+    return () => { live = false; };
+  }, [apiUserId, toast]);
+
+  const saveAccountSettings = async (patch: Record<string, unknown>) => {
+    setAccountSettingsSaving(true);
+    try {
+      const { settings: saved } = await request<{ settings: { isPrivate?: boolean; privacy?: Partial<typeof defaultAccountPrivacy>; notificationPreferences?: Partial<typeof defaultNotificationPreferences> } }>("/users/me/settings", { method: "PATCH", body: JSON.stringify(patch) });
+      setAccountSettings((previous) => ({ isPrivate: saved.isPrivate ?? previous.isPrivate, privacy: { ...previous.privacy, ...saved.privacy }, notificationPreferences: { ...previous.notificationPreferences, ...saved.notificationPreferences } }));
+      toast({ title: "Account preferences saved", tone: "success" });
+    } catch (error) {
+      toast({ title: "Account preferences weren’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+    } finally { setAccountSettingsSaving(false); }
+  };
+  const loadSafetyItems = async () => {
+    if (!apiUserId) return;
+    setSafetyLoading(true);
+    try {
+      const [blocked, requests] = await Promise.all([
+        request<{ items: typeof blockedUsers }>("/users/blocked"),
+        request<{ items: SafetyFollowRequest[] }>("/follow-requests/incoming"),
+      ]);
+      setBlockedUsers(blocked.items);
+      setFollowRequests(requests.items);
+    } catch (error) {
+      toast({ title: "Safety settings couldn’t be loaded", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+    } finally { setSafetyLoading(false); }
+  };
+  useEffect(() => { if (section === "safety") void loadSafetyItems(); }, [section, apiUserId]);
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
   const [passwordBusy, setPasswordBusy] = useState(false);
 
@@ -152,6 +204,7 @@ export default function SettingsPage() {
                   />
                   <Row icon={<Brush className="h-4 w-4" />} label="Edit profile" hint="Photo, name, bio and course" onClick={() => navigate("/profile?edit=1")} />
                   <Row icon={<KeyRound className="h-4 w-4" />} label="Change password" hint="Update your account credentials" onClick={() => setPasswordSheet(true)} />
+                  <Row icon={<Trash2 className="h-4 w-4" />} label="Delete account" hint="Permanently remove your account and personal content" danger onClick={() => setDeleteAccountSheet(true)} />
                   <Row
                     icon={<LogOut className="h-4 w-4" />}
                     label="Log out"
@@ -160,7 +213,7 @@ export default function SettingsPage() {
                     onClick={async () => {
                       const ok = await confirm({
                         title: "Log out of CampusLaugh?",
-                        message: "Local demo data stays on this device, but the interface session will be reset.",
+                        message: "You’ll be signed out of this account on this device.",
                         confirmLabel: "Log out",
                         tone: "danger",
                       });
@@ -225,12 +278,13 @@ export default function SettingsPage() {
 
               {section === "privacy" && (
                 <Group title="Privacy">
+                  <Row icon={<Shield className="h-4 w-4" />} label="Private account" hint="Only approved followers can see your posts" trailing={<Switch checked={accountSettings.isPrivate} disabled={accountSettingsLoading || accountSettingsSaving || !apiUserId} label="Private account" onChange={(value) => void saveAccountSettings({ isPrivate: value })} />} />
                   <div className="px-4 py-3.5">
                     <p className="text-[13px] font-bold text-ink">Who can message me</p>
-                    <p className="mb-2.5 text-[11.5px] text-ink3">Applies to new conversation requests</p>
+                    <p className="mb-2.5 text-[11.5px] text-ink3">Saved to your account and enforced for new messages</p>
                     <Segmented
-                      value={settings.whoCanMessage}
-                      onChange={(v) => update("whoCanMessage", v)}
+                      value={accountSettings.privacy.whoCanMessage}
+                      onChange={(whoCanMessage) => void saveAccountSettings({ privacy: { whoCanMessage } })}
                       options={[
                         { value: "everyone", label: "Everyone" },
                         { value: "campus", label: "My campus" },
@@ -238,9 +292,14 @@ export default function SettingsPage() {
                       ]}
                     />
                   </div>
-                  <Toggle setting="onlineVisibility" label="Show online status" hint="Others see when you're active" icon={<Eye className="h-4 w-4" />} />
-                  <Toggle setting="readReceipts" label="Read receipts" hint="Send blue ticks when you read a message" icon={<Check className="h-4 w-4" />} />
-                  <Toggle setting="institutionVisibility" label="Show my institution" hint="Displayed on your posts and profile" icon={<Shield className="h-4 w-4" />} />
+                  {([
+                    ["showFollowers", "Show followers", "Allow people who can view your profile to see your followers."],
+                    ["showFollowing", "Show following", "Allow people who can view your profile to see who you follow."],
+                    ["showOnlineStatus", "Show online status", "Show when your account is active."],
+                    ["showActivity", "Show activity", "Allow your activity to appear in discovery."],
+                    ["allowPostInteractions", "Allow post interactions", "Allow likes and comments on your posts."],
+                    ["showReadReceipts", "Send read receipts", "Let message senders see when you have read their messages."],
+                  ] as const).map(([key, label, hint]) => <Row key={key} icon={<Eye className="h-4 w-4" />} label={label} hint={hint} trailing={<Switch checked={accountSettings.privacy[key]} disabled={accountSettingsLoading || accountSettingsSaving || !apiUserId} label={label} onChange={(value) => void saveAccountSettings({ privacy: { [key]: value } })} />} />)}
                 </Group>
               )}
 
@@ -248,45 +307,11 @@ export default function SettingsPage() {
                 <Group title="Notifications">
                   <Toggle setting="banners" label="Floating banners" hint="System-style banners at the top of the screen" icon={<Bell className="h-4 w-4" />} />
                   <Toggle setting="island" label="Capsule alerts" hint="CampusLaugh's floating capsule for live activity" icon={<Radio className="h-4 w-4" />} />
-                  <Toggle setting="notifyMessages" label="Messages" icon={<Bell className="h-4 w-4" />} />
-                  <Toggle setting="notifyLikes" label="Likes" icon={<Bell className="h-4 w-4" />} />
-                  <Toggle setting="notifyComments" label="Comments & replies" icon={<Bell className="h-4 w-4" />} />
-                  <Toggle setting="notifyFollowers" label="New followers" icon={<Bell className="h-4 w-4" />} />
-                  <Toggle setting="notifyMentions" label="Mentions" icon={<Bell className="h-4 w-4" />} />
-                  <Toggle setting="notifyCampus" label="Campus announcements" icon={<Bell className="h-4 w-4" />} />
+                  {([
+                    ["likes", "Likes"], ["comments", "Comments"], ["replies", "Replies"], ["followers", "New followers"], ["mentions", "Mentions"], ["reposts", "Reposts"], ["messages", "Direct messages"], ["announcements", "Announcements"], ["administrative", "Administrative notices"],
+                  ] as const).map(([key, label]) => <Row key={key} icon={<Bell className="h-4 w-4" />} label={label} trailing={<Switch checked={accountSettings.notificationPreferences[key]} disabled={accountSettingsLoading || accountSettingsSaving || !apiUserId} label={label} onChange={(value) => void saveAccountSettings({ notificationPreferences: { [key]: value } })} />} />)}
                   <Toggle setting="sound" label="Sound" hint="Plays a soft tone after your first tap" icon={<Volume2 className="h-4 w-4" />} />
                   <Toggle setting="vibration" label="Vibration" hint="Where the device supports it" icon={<Vibrate className="h-4 w-4" />} />
-                  <Row
-                    icon={<Radio className="h-4 w-4" />}
-                    label="Demo activity stream"
-                    hint="Simulated likes, messages and banners arriving in the background"
-                    trailing={
-                      <Switch
-                        checked={settings.demoActivity}
-                        onChange={(v) => {
-                          update("demoActivity", v);
-                          setAmbient(v);
-                          toast({ title: v ? "Demo activity on" : "Demo activity paused", tone: "info" });
-                        }}
-                        label="Demo activity"
-                      />
-                    }
-                  />
-                  <Row
-                    icon={<BellOff className="h-4 w-4" />}
-                    label="Test a notification"
-                    hint="Fires a banner, capsule alert and centre entry"
-                    onClick={() =>
-                      actionSheet({
-                        title: "Send a test notification",
-                        actions: [
-                          { id: "message", label: "New message", icon: <Bell className="h-4 w-4" />, onSelect: () => fireTest("message") },
-                          { id: "like", label: "Someone liked your post", icon: <Bell className="h-4 w-4" />, onSelect: () => fireTest("like") },
-                          { id: "campus", label: "Campus announcement", icon: <Bell className="h-4 w-4" />, onSelect: () => fireTest("campus") },
-                        ],
-                      })
-                    }
-                  />
                 </Group>
               )}
 
@@ -305,43 +330,14 @@ export default function SettingsPage() {
                     hint={`${conversations.filter((c) => c.muted).length} muted`}
                     onClick={() => navigate("/chats")}
                   />
-                  <Toggle setting="readReceipts" label="Send read receipts" icon={<Check className="h-4 w-4" />} />
-                  <Row
-                    icon={<Trash2 className="h-4 w-4" />}
-                    label="Media auto-download"
-                    hint="Attachments are created locally in the browser"
-                    onClick={() => toast({ title: "Media preference saved", tone: "success" })}
-                  />
                 </Group>
               )}
 
               {section === "safety" && (
                 <Group title="Safety">
-                  <Row icon={<Shield className="h-4 w-4" />} label="Blocked users" hint="Nobody is blocked in this demo session" onClick={() => toast({ title: "Blocked list is empty", tone: "info" })} />
-                  <Row icon={<BellOff className="h-4 w-4" />} label="Muted users" hint={`${conversations.filter((c) => c.muted).length} muted conversation(s)`} onClick={() => navigate("/chats")} />
-                  <Row icon={<Archive className="h-4 w-4" />} label="Report history" hint={`${notifications.filter((n) => n.kind === "account").length} account events logged locally`} onClick={() => navigate("/notifications")} />
-                  <Row
-                    icon={<WifiOff className="h-4 w-4" />}
-                    label="Simulate connection errors"
-                    hint="Shows the offline / error states across the app"
-                    danger={settings.simulateErrors}
-                    trailing={<Switch checked={settings.simulateErrors} onChange={(v) => { update("simulateErrors", v); toast({ title: v ? "Offline mode simulated" : "Back online", tone: v ? "warning" : "success" }); }} label="Simulate errors" />}
-                  />
-                  <Row
-                    icon={<Trash2 className="h-4 w-4" />}
-                    label="Reset demo data"
-                    hint="Restores posts, chats, notifications and your profile"
-                    danger
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: "Reset all demo data?",
-                        message: "Everything stored in localStorage for CampusLaugh will be replaced with the original demonstration content.",
-                        confirmLabel: "Reset data",
-                        tone: "danger",
-                      });
-                      if (ok) resetDemoData();
-                    }}
-                  />
+                  <div className="px-4 py-3.5"><p className="text-[13px] font-bold text-ink">Follow requests</p>{safetyLoading ? <p className="py-3 text-sm text-ink3">Loading requests…</p> : followRequests.length ? <div className="mt-2 space-y-2">{followRequests.map((item) => <div key={item._id} className="flex items-center gap-2 rounded-2xl border border-line p-2.5"><Avatar src={item.requesterId.avatar} name={item.requesterId.name} size={36}/><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-ink">{item.requesterId.name}</p><p className="text-xs text-ink3">@{item.requesterId.username}</p></div><Button size="xs" variant="brand" onClick={async()=>{try{await request(`/follow-requests/${item._id}`,{method:"PATCH",body:JSON.stringify({status:"accepted"})});await loadSafetyItems();toast({title:"Follow request accepted",tone:"success"})}catch(error){toast({title:"Request wasn’t updated",description:error instanceof Error?error.message:"Try again.",tone:"error"})}}}>Accept</Button><Button size="xs" variant="outline" onClick={async()=>{try{await request(`/follow-requests/${item._id}`,{method:"PATCH",body:JSON.stringify({status:"rejected"})});await loadSafetyItems()}catch(error){toast({title:"Request wasn’t updated",description:error instanceof Error?error.message:"Try again.",tone:"error"})}}}>Decline</Button></div>)}</div> : <p className="py-3 text-sm text-ink3">No pending follow requests.</p>}</div>
+                  <div className="px-4 py-3.5"><p className="text-[13px] font-bold text-ink">Blocked accounts</p>{safetyLoading ? <p className="py-3 text-sm text-ink3">Loading blocked accounts…</p> : blockedUsers.length ? <div className="mt-2 space-y-2">{blockedUsers.map((user) => <div key={user._id} className="flex items-center gap-2 rounded-2xl border border-line p-2.5"><Avatar src={user.avatar} name={user.name} size={36}/><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-ink">{user.name}</p><p className="text-xs text-ink3">@{user.username}</p></div><Button size="xs" variant="outline" onClick={async()=>{try{await request(`/users/${user._id}/block`,{method:"DELETE"});setBlockedUsers((items)=>items.filter((item)=>item._id!==user._id));toast({title:`@${user.username} unblocked`,tone:"success"})}catch(error){toast({title:"Could not unblock account",description:error instanceof Error?error.message:"Try again.",tone:"error"})}}}>Unblock</Button></div>)}</div> : <p className="py-3 text-sm text-ink3">No blocked accounts.</p>}</div>
+                  <Row icon={<BellOff className="h-4 w-4" />} label="Muted conversations" hint={`${conversations.filter((c) => c.muted).length} muted`} onClick={() => navigate("/chats")} />
                 </Group>
               )}
 
@@ -349,25 +345,21 @@ export default function SettingsPage() {
                 <Group title="About this build">
                   <div className="px-4 py-4">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge tone="brand">Frontend only</Badge>
-                      <Badge tone="mint">No backend calls</Badge>
-                      <Badge>localStorage persistence</Badge>
+                      <Badge tone={apiUserId ? "mint" : "neutral"}>{apiUserId ? "Authenticated API" : "Sign in required"}</Badge>
+                      <Badge>Liquid Glass 27</Badge>
                     </div>
                     <p className="mt-3 text-[13px] leading-relaxed text-ink2">
                       CampusLaugh is a student social platform for memes, pictures, videos, jokes, discussions and
-                      messages. This build is the complete interface: every screen, gesture, sheet and notification
-                      behaves for real, but the data is demonstration content created in the browser.
-                    </p>
-                    <p className="mt-2 text-[13px] leading-relaxed text-ink2">
-                      A service layer (<code className="rounded bg-ink/8 px-1 py-0.5 text-[12px]">src/services/api.ts</code>)
-                      isolates all data access, so a real API can be connected without rebuilding the UI.
+                      messages. Feed, profile, messaging and notifications use authenticated account data from the API.
+                      Appearance and interface preferences are saved in this browser.
                     </p>
                     <dl className="mt-3 grid grid-cols-2 gap-2 text-[12px]">
                       {[
                         ["Design system", "Liquid Glass 27"],
                         ["Motion", "Framer Motion springs"],
-                        ["Posts in demo", String(20)],
+                        ["Posts loaded", String(posts.length)],
                         ["Conversations", String(conversations.length)],
+                        ["Notifications", String(notifications.length)],
                       ].map(([k, v]) => (
                         <div key={k} className="rounded-2xl border border-line bg-glass px-3 py-2">
                           <dt className="font-bold uppercase tracking-wide text-ink3 text-[10.5px]">{k}</dt>
@@ -388,7 +380,7 @@ export default function SettingsPage() {
           </AnimatePresence>
 
           <p className="mt-3 px-2 text-[11px] leading-relaxed text-ink3">
-            Preferences are saved with <code>localStorage</code>. Nothing leaves this browser.
+            Appearance preferences are saved in this browser. Account content is loaded from CampusLaugh.
           </p>
         </div>
       </div>
@@ -426,6 +418,29 @@ export default function SettingsPage() {
       </BottomSheet>
 
       {/* password settings */}
+      <BottomSheet open={deleteAccountSheet} onClose={() => setDeleteAccountSheet(false)} title="Delete account" desktop="center" className="max-h-none">
+        <form className="space-y-3 p-4" onSubmit={async (event) => {
+          event.preventDefault();
+          if (deleteAccountConfirmation !== "DELETE") return toast({ title: "Type DELETE to confirm", tone: "error" });
+          if (!deleteAccountPassword) return toast({ title: "Enter your current password", tone: "error" });
+          setDeleteAccountBusy(true);
+          try {
+            const result = await request<{ mediaCleanupComplete: boolean }>("/users/me", { method: "DELETE", body: JSON.stringify({ currentPassword: deleteAccountPassword, confirmation: deleteAccountConfirmation }) });
+            setAccessToken(null);
+            setDeleteAccountSheet(false);
+            if (!result.mediaCleanupComplete) toast({ title: "Account deleted", description: "Your account data was removed, but some external media may need administrator cleanup.", tone: "warning" });
+            navigate("/login", { replace: true });
+          } catch (error) {
+            toast({ title: "Account wasn’t deleted", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+          } finally { setDeleteAccountBusy(false); }
+        }}>
+          <p className="rounded-2xl border border-coral/30 bg-coral/10 p-3 text-sm text-ink2">Your posts, comments, notifications and direct conversations will be removed. Messages in shared groups will be cleared, and your group memberships will end. This cannot be undone.</p>
+          <label className="block"><span className="mb-1 block text-xs font-bold text-ink2">Current password</span><input className="field h-11 w-full rounded-xl px-3 text-sm" type="password" autoComplete="current-password" value={deleteAccountPassword} onChange={(event) => setDeleteAccountPassword(event.target.value)} required /></label>
+          <label className="block"><span className="mb-1 block text-xs font-bold text-ink2">Type DELETE to confirm</span><input className="field h-11 w-full rounded-xl px-3 text-sm" value={deleteAccountConfirmation} onChange={(event) => setDeleteAccountConfirmation(event.target.value)} autoComplete="off" required /></label>
+          <Button type="submit" variant="danger" block loading={deleteAccountBusy} icon={<Trash2 className="h-4 w-4" />}>Delete my account</Button>
+        </form>
+      </BottomSheet>
+
       <BottomSheet open={passwordSheet} onClose={() => setPasswordSheet(false)} title="Change password" desktop="center" className="max-h-none">
         <form
           className="space-y-3 p-4"
@@ -476,31 +491,6 @@ export default function SettingsPage() {
     </motion.div>
   );
 
-  function fireTest(kind: "message" | "like" | "campus") {
-    const actor = userById("u4");
-    const copy =
-      kind === "message"
-        ? { title: `${actor.name} sent you a message`, body: "Are you coming to the comedy night on Friday?", to: "/chats/cv1" }
-        : kind === "like"
-          ? { title: `${actor.name} liked your post`, body: "\u201cShipped a tiny feature tonight\u2026\u201d", to: "/home" }
-          : { title: "UNILAG \u00b7 Comedy Night", body: "Friday 7pm, Main Auditorium. Doors close at 7:30.", to: "/explore" };
-    const n = pushNotification({ kind, actorId: kind === "campus" ? undefined : actor.id, ...copy });
-    pushBanner({
-      title: copy.title,
-      body: copy.body,
-      avatar: kind === "campus" ? undefined : actor.avatar,
-      time: "now",
-      tone: kind === "message" ? "message" : "default",
-      expandedBody: "Tap to open · swipe sideways or up to dismiss",
-      onOpen: () => navigate(copy.to),
-      onMarkRead: () => {
-        markNotificationRead(n.id);
-        navigate("/notifications");
-      },
-    });
-    showIsland({ title: "CampusLaugh", subtitle: copy.title, duration: 4200, onOpen: () => navigate(copy.to) });
-    toast({ title: "Test notification fired", description: "Banner, capsule and notification centre updated", tone: "info" });
-  }
 }
 
 function Group({ title, children }: { title: string; children: React.ReactNode }) {

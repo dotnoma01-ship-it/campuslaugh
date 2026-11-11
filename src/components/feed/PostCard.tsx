@@ -18,7 +18,7 @@ import { useNavigate } from "react-router-dom";
 import { useSystem } from "@/context/SystemContext";
 import { useTheme } from "@/context/ThemeContext";
 import { useStore } from "@/context/StoreContext";
-import { ME, reportReasons } from "@/data/mock";
+import { ME, reportReasons } from "@/data/constants";
 import type { MediaItem, Post } from "@/types";
 import { cn, compact, copyText, timeAgo } from "@/utils/format";
 import { Avatar, IconButton } from "@/components/ui/primitives";
@@ -241,7 +241,7 @@ export function PostCard({
   const reportFlow = async () => {
     const choice = await actionSheet({
       title: "Report this post?",
-      message: "Reports are handled by the CampusLaugh moderation queue (frontend demo).",
+      message: "Reports are sent to the CampusLaugh moderation queue.",
       actions: reportReasons.map((r) => ({ id: r, label: r })),
     });
     if (choice) reportPost(post.id, choice);

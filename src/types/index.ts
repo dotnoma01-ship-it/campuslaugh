@@ -10,6 +10,11 @@ export interface User {
   cover?: string;
   bio?: string;
   course?: string;
+  department?: string;
+  location?: string;
+  website?: string;
+  isPrivate?: boolean;
+  inaccessible?: boolean;
   followers: number;
   following: number;
   verified?: boolean;
@@ -91,6 +96,7 @@ export interface Message {
   edited?: boolean;
   deleted?: boolean;
   forwarded?: boolean;
+  forwardedFrom?: string;
 }
 
 export interface Conversation {
@@ -98,6 +104,9 @@ export interface Conversation {
   participantIds: string[];
   group?: boolean;
   title?: string;
+  image?: string;
+  ownerId?: string;
+  admins?: string[];
   messages: Message[];
   unread: number;
   pinned?: boolean;
@@ -138,8 +147,6 @@ export interface Settings {
   accent: "lime" | "mint" | "coral";
   whoCanMessage: "everyone" | "following" | "campus";
   onlineVisibility: boolean;
-  readReceipts: boolean;
-  institutionVisibility: boolean;
   notifyMessages: boolean;
   notifyLikes: boolean;
   notifyComments: boolean;
@@ -154,8 +161,6 @@ export interface Settings {
   mediaAutoplay: boolean;
   wallpaper: WallpaperId;
   compactFeed: boolean;
-  simulateErrors: boolean;
-  demoActivity: boolean;
 }
 
 export interface ToastItem {

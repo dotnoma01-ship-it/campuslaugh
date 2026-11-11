@@ -102,11 +102,56 @@ test('two accounts exchange persistent Socket.IO messages with membership enforc
   assert.equal(outsiderJoin.ok, false);
 
   const incoming = waitFor(bobSocket, 'message:new');
+  const notificationIncoming = waitFor(bobSocket, 'notification:new');
   const sent = await emitAck(aliceSocket, 'message:send', { conversationId: conversation._id, text: `local socket ${nonce}` });
   assert.ok(sent.message?._id);
   const delivered = await incoming;
   assert.equal(String(delivered._id), String(sent.message._id));
   assert.equal(delivered.text, `local socket ${nonce}`);
+  const notificationEvent = await notificationIncoming;
+  assert.equal(notificationEvent.kind, 'message');
+  assert.equal(String(notificationEvent.recipientId), String(bob.user.id));
+  assert.equal(String(notificationEvent.conversationId), String(conversation._id));
+
+  const bobHeaders = { authorization: `Bearer ${bob.accessToken}` };
+  const notificationsResponse = await fetch(`${origin}/api/notifications`, { headers: bobHeaders });
+  assert.equal(notificationsResponse.status, 200);
+  const persistedNotification = (await notificationsResponse.json()).items.find((item) => String(item._id) === String(notificationEvent._id));
+  assert.ok(persistedNotification, 'Socket notification must also be persisted in MongoDB.');
+  const forbiddenNotification = await fetch(`${origin}/api/notifications/${notificationEvent._id}/read`, { method: 'PATCH', headers: { authorization: `Bearer ${outsider.accessToken}` } });
+  assert.equal(forbiddenNotification.status, 404);
+  const markedRead = await fetch(`${origin}/api/notifications/${notificationEvent._id}/read`, { method: 'PATCH', headers: bobHeaders });
+  assert.equal(markedRead.status, 200);
+  const refreshedNotifications = await fetch(`${origin}/api/notifications`, { headers: bobHeaders });
+  const refreshedItem = (await refreshedNotifications.json()).items.find((item) => String(item._id) === String(notificationEvent._id));
+  assert.ok(refreshedItem?.readAt, 'Read status must persist after reloading notifications.');
+  const deletedNotification = await fetch(`${origin}/api/notifications/${notificationEvent._id}`, { method: 'DELETE', headers: bobHeaders });
+  assert.equal(deletedNotification.status, 200);
+  const afterDelete = await fetch(`${origin}/api/notifications`, { headers: bobHeaders });
+  assert.ok(!(await afterDelete.json()).items.some((item) => String(item._id) === String(notificationEvent._id)));
+
+  const httpNotificationIncoming = waitFor(bobSocket, 'notification:new');
+  const httpMessageResponse = await fetch(`${origin}/api/conversations/${conversation._id}/messages`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${alice.accessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ text: `local HTTP ${nonce}` }),
+  });
+  assert.equal(httpMessageResponse.status, 201);
+  const { message: httpMessage } = await httpMessageResponse.json();
+  assert.equal(httpMessage.text, `local HTTP ${nonce}`);
+  const httpNotification = await httpNotificationIncoming;
+  assert.equal(httpNotification.kind, 'message');
+  assert.equal(String(httpNotification.recipientId), String(bob.user.id));
+  assert.equal(String(httpNotification.conversationId), String(conversation._id));
+  const httpNotificationList = await fetch(`${origin}/api/notifications`, { headers: bobHeaders });
+  assert.equal(httpNotificationList.status, 200);
+  assert.ok((await httpNotificationList.json()).items.some((item) => String(item._id) === String(httpNotification._id)), 'HTTP message notification must be persisted in MongoDB.');
+  const outsiderHttpMessage = await fetch(`${origin}/api/conversations/${conversation._id}/messages`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${outsider.accessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'unauthorized' }),
+  });
+  assert.equal(outsiderHttpMessage.status, 404, 'A non-member cannot send an HTTP conversation message.');
 
   const typing = waitFor(aliceSocket, 'typing');
   bobSocket.emit('typing', { conversationId: conversation._id, active: true });
@@ -127,5 +172,26 @@ test('two accounts exchange persistent Socket.IO messages with membership enforc
     body: JSON.stringify({ memberIds: [bob.user.id], group: true, title: 'Local test group' }),
   });
   assert.equal(groupResponse.status, 201);
-  assert.equal((await groupResponse.json()).conversation.group, true);
+  const { conversation: group } = await groupResponse.json();
+  assert.equal(group.group, true);
+
+  const forwardedNotificationIncoming = waitFor(bobSocket, 'notification:new');
+  const forwardedResponse = await fetch(`${origin}/api/messages/${sent.message._id}/forward`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${alice.accessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ conversationIds: [group._id] }),
+  });
+  assert.equal(forwardedResponse.status, 201);
+  const forwarded = (await forwardedResponse.json()).messages[0];
+  assert.equal(String(forwarded.forwardedFrom.messageId), String(sent.message._id));
+  const forwardedNotification = await forwardedNotificationIncoming;
+  assert.equal(forwardedNotification.kind, 'message');
+  const groupList = await fetch(`${origin}/api/conversations`, { headers: bobHeaders });
+  const unreadGroup = (await groupList.json()).items.find((item) => String(item._id) === String(group._id));
+  assert.equal(unreadGroup.unread, 1, 'Forwarding should increment the recipient unread count in MongoDB.');
+  const markedConversationRead = await fetch(`${origin}/api/conversations/${group._id}/read`, { method: 'PATCH', headers: bobHeaders });
+  assert.equal(markedConversationRead.status, 200);
+  const refreshedGroups = await fetch(`${origin}/api/conversations`, { headers: bobHeaders });
+  const readGroup = (await refreshedGroups.json()).items.find((item) => String(item._id) === String(group._id));
+  assert.equal(readGroup.unread, 0, 'Read state should persist after reloading conversations.');
 });

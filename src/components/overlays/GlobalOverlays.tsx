@@ -1,10 +1,10 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, Link2, Mail, MessageCircle, MoreHorizontal, QrCode, Share2, ShieldAlert, X } from "lucide-react";
+import { Check, Link2, MessageCircle, MoreHorizontal, Share2, ShieldAlert, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSystem } from "@/context/SystemContext";
 import { useStore } from "@/context/StoreContext";
-import { reportReasons, shareTargets } from "@/data/mock";
+import { reportReasons } from "@/data/constants";
 import { cn, copyText } from "@/utils/format";
 import { Avatar, Button } from "@/components/ui/primitives";
 import { springSnappy } from "@/components/ui/primitives";
@@ -12,6 +12,7 @@ import { ActionSheetHost, BottomSheet, ConfirmHost, Modal } from "@/components/u
 import { PostCard } from "@/components/feed/PostCard";
 import { MediaViewer } from "@/components/feed/Media";
 import { ProfilePreview } from "@/components/profile/ProfilePreview";
+import { backend } from "@/services/backend";
 
 /**
  * Renders every globally-triggered overlay: post detail, profile preview,
@@ -50,9 +51,11 @@ export function GlobalOverlays() {
       <ReportDialog
         open={overlay?.kind === "report"}
         onClose={closeOverlay}
-        onReport={(reason) => {
+        onReport={async (reason, details) => {
+          if (overlay?.kind !== "report" || !post) throw new Error("This post is no longer available.");
+          await backend.report("post", overlay.postId, reason, details);
           closeOverlay();
-          toast({ title: "Report submitted", description: `${reason} · queued locally in this demo`, tone: "warning" });
+          toast({ title: "Report submitted", description: "Thanks for helping keep CampusLaugh safe.", tone: "success" });
         }}
       />
 
@@ -88,10 +91,14 @@ function ShareSheet({
   postAuthor: string;
 }) {
   const { toast, showOverlay } = useSystem();
-  const { startConversation, sendMessage } = useStore();
+  const { sendMessage, conversations, userById } = useStore();
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
-  const link = postId ? `https://campuslaugh.app/post/${postId}` : "https://campuslaugh.app";
+  const link = postId ? `${window.location.origin}/#/home?post=${encodeURIComponent(postId)}` : window.location.origin;
+  const shareTargets = conversations.filter((conversation) => !conversation.archived).map((conversation) => {
+    const person = conversation.group ? undefined : userById(conversation.participantIds[0] ?? "me");
+    return { id: conversation.id, label: conversation.group ? conversation.title ?? "Group chat" : person?.name ?? "Conversation", avatar: person?.avatar };
+  });
 
   useEffect(() => {
     if (!open) setCopied(false);
@@ -127,31 +134,23 @@ function ShareSheet({
                 transition={{ delay: i * 0.035, ...springSnappy }}
                 whileTap={{ scale: 0.93 }}
                 onClick={() => {
-                  if (t.id.startsWith("cv")) {
-                    sendMessage(t.id, { kind: "text", text: `Check this out 👀 ${link}` });
-                    toast({ title: `Sent to ${t.label}`, tone: "success" });
-                  } else {
-                    void startConversation(t.id).then((convId) => {
-                      sendMessage(convId, { kind: "text", text: `Check this out 👀 ${link}` });
-                      toast({ title: `Sent to ${t.label}`, tone: "success" });
-                    }).catch(() => undefined);
-                  }
+                  sendMessage(t.id, { kind: "text", text: `Check this out: ${link}` });
+                  toast({ title: "Sharing to conversation", description: t.label, tone: "info" });
                   onClose();
                 }}
                 className="flex w-[68px] shrink-0 flex-col items-center gap-1.5"
               >
-                <Avatar src={t.id.startsWith("cv") ? undefined : undefined} name={t.label} size={52} />
+                <Avatar src={t.avatar} name={t.label} size={52} />
                 <span className="line-clamp-2 text-center text-[11px] font-semibold text-ink2">{t.label}</span>
               </motion.button>
             ))}
+            {shareTargets.length === 0 && <p className="text-xs text-ink3">No conversations available to share to.</p>}
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 gap-2">
           {[
             { id: "chat", label: "Messages", icon: <MessageCircle className="h-5 w-5" />, action: () => { onClose(); navigate("/chats"); } },
-            { id: "mail", label: "Mail", icon: <Mail className="h-5 w-5" />, action: () => toast({ title: "Mail handoff (demo)", description: "No mail client is wired up in this build", tone: "info" }) },
-            { id: "qr", label: "QR code", icon: <QrCode className="h-5 w-5" />, action: () => toast({ title: "QR generated", description: link, tone: "success" }) },
             { id: "more", label: "More", icon: <MoreHorizontal className="h-5 w-5" />, action: () => { if (navigator.share) void navigator.share({ title: "CampusLaugh", url: link }).catch(() => undefined); else void copy(); } },
           ].map((o, i) => (
             <motion.button
@@ -191,25 +190,29 @@ function ReportDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  onReport: (reason: string) => void;
+  onReport: (reason: string, details: string) => Promise<void>;
 }) {
   const [reason, setReason] = useState<string | null>(null);
   const [details, setDetails] = useState("");
   const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (open) {
       setReason(null);
       setDetails("");
       setSending(false);
+      setError("");
     }
   }, [open]);
 
   const submit = async () => {
     if (!reason) return;
     setSending(true);
-    await new Promise((r) => setTimeout(r, 620));
-    onReport(details.trim() ? `${reason} — ${details.trim()}` : reason);
+    setError("");
+    try { await onReport(reason, details.trim()); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not send your report."); }
+    finally { setSending(false); }
   };
 
   return (
@@ -217,7 +220,7 @@ function ReportDialog({
       open={open}
       onClose={onClose}
       title="Report content"
-      subtitle="Moderation is demonstrated on the frontend — nothing is transmitted."
+      subtitle="Reports are sent to the CampusLaugh moderation queue."
       width="max-w-md"
       footer={
         <div className="flex gap-2">
@@ -229,6 +232,7 @@ function ReportDialog({
       }
     >
       <div className="space-y-1.5 pb-1">
+        {error && <p role="alert" className="rounded-xl border border-coral/30 bg-coral/10 p-3 text-xs text-coral">{error}</p>}
         {reportReasons.map((r) => (
           <button
             key={r}

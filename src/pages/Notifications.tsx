@@ -47,7 +47,7 @@ const KIND_META: Record<NotificationKind, { icon: React.ReactNode; tone: string 
 
 export default function Notifications() {
   const navigate = useNavigate();
-  const { notifications, markAllNotificationsRead, markNotificationRead, clearNotifications, removeNotification, userById, unreadNotifications, toggleFollow, isFollowing } = useStore();
+  const { notifications, notificationsLoading, notificationsError, reloadNotifications, markAllNotificationsRead, markNotificationRead, clearNotifications, removeNotification, userById, unreadNotifications, toggleFollow, isFollowing } = useStore();
   const { confirm, toast } = useSystem();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("all");
 
@@ -115,7 +115,7 @@ export default function Notifications() {
           onClick={async () => {
             const ok = await confirm({
               title: "Clear all notifications?",
-              message: "This removes the notification history stored on this device.",
+              message: "This permanently deletes all notifications saved to your account.",
               confirmLabel: "Clear all",
               tone: "danger",
             });
@@ -142,7 +142,11 @@ export default function Notifications() {
       </div>
 
       <div className="px-3 lg:px-0">
-        {list.length === 0 ? (
+        {notificationsLoading ? (
+          <div role="status" className="glass rounded-[22px] p-6 text-center text-sm font-semibold text-ink2">Loading notifications…</div>
+        ) : notificationsError ? (
+          <EmptyState icon={<BellOff className="h-6 w-6" />} title="Notifications are unavailable" body="We couldn’t load your notification history." action={<Button size="sm" variant="brand" onClick={reloadNotifications}>Try again</Button>} />
+        ) : list.length === 0 ? (
           <EmptyState
             icon={<BellOff className="h-6 w-6" />}
             title={filter === "all" ? "No notifications yet" : "Nothing in this filter"}

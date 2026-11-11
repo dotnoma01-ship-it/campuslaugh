@@ -2,7 +2,6 @@ import { AnimatePresence, motion, useScroll, useTransform } from "framer-motion"
 import {
   BadgeCheck,
   Bookmark,
-  Calendar,
   Check,
   Image as ImageIcon,
   Link2,
@@ -20,7 +19,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useStore } from "@/context/StoreContext";
 import { useSystem } from "@/context/SystemContext";
-import { ME, userArray } from "@/data/mock";
+import { ME } from "@/data/constants";
 import { cn, compact, copyText } from "@/utils/format";
 import { Avatar, Badge, Button, EmptyState, IconButton } from "@/components/ui/primitives";
 import { spring } from "@/components/ui/primitives";
@@ -30,31 +29,31 @@ import { PostCard } from "@/components/feed/PostCard";
 import { MediaViewer } from "@/components/feed/Media";
 import type { MediaItem, User } from "@/types";
 import { backend } from "@/services/backend";
+import { request } from "@/services/http";
+import { uploadMedia } from "@/services/upload";
 
-type Tab = "posts" | "replies" | "media" | "saved";
+type Tab = "posts" | "replies" | "media" | "likes" | "reposts" | "saved";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "posts", label: "Posts" },
   { id: "replies", label: "Replies" },
   { id: "media", label: "Media" },
-  { id: "saved", label: "Likes" },
-];
-
-const SAMPLE_AVATARS = [
-  "https://images.pexels.com/photos/29615996/pexels-photo-29615996.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=200&w=200",
-  "https://images.pexels.com/photos/6102841/pexels-photo-6102841.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=200&w=200",
-  "https://images.pexels.com/photos/40322798/pexels-photo-40322798.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=200&w=200",
-  "https://images.pexels.com/photos/34081654/pexels-photo-34081654.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=200&w=200",
-  "https://images.pexels.com/photos/16160871/pexels-photo-16160871.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=200&w=200",
+  { id: "likes", label: "Likes" },
+  { id: "reposts", label: "Reposts" },
+  { id: "saved", label: "Saved" },
 ];
 
 export default function Profile() {
   const { userId } = useParams();
   const navigate = useNavigate();
-  const { userById, users, posts, me, apiUserId, cacheUser, updateProfile, toggleFollow, isFollowing, startConversation, bookmarks } = useStore();
+  const { userById, users, posts, me, apiUserId, cacheUser, updateProfile, toggleFollow, isFollowing, isFollowRequested, startConversation, bookmarks } = useStore();
   const { toast, actionSheet, confirm, showOverlay } = useSystem();
   const menu = useContextMenu();
   const [tab, setTab] = useState<Tab>("posts");
+  const [profileItems, setProfileItems] = useState<import("@/types").Post[]>([]);
+  const [profileStats, setProfileStats] = useState<{ posts: number; likes: number; reposts: number; followers: number; following: number; saved?: number } | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState(false);
   const [editing, setEditing] = useState(false);
   const [viewer, setViewer] = useState<{ items: MediaItem[]; index: number } | null>(null);
   const coverRef = useRef<HTMLDivElement>(null);
@@ -74,6 +73,24 @@ export default function Profile() {
 
   useEffect(() => setTab("posts"), [userId]);
 
+  const profileApiId = isMe ? apiUserId : /^[a-f\d]{24}$/i.test(user.id) ? user.id : null;
+  useEffect(() => {
+    if (!profileApiId) { setProfileItems([]); setProfileStats(null); setProfileError(false); return; }
+    let live = true;
+    setProfileLoading(true);
+    setProfileError(false);
+    void Promise.all([backend.getProfilePosts(profileApiId, tab), backend.getProfileStats(profileApiId)])
+      .then(([feed, result]) => {
+        if (!live) return;
+        feed.authors.forEach(cacheUser);
+        setProfileItems(feed.items);
+        setProfileStats(result.stats);
+      })
+      .catch(() => { if (live) { setProfileItems([]); setProfileError(true); } })
+      .finally(() => { if (live) setProfileLoading(false); });
+    return () => { live = false; };
+  }, [profileApiId, tab, cacheUser]);
+
   const userPosts = useMemo(() => posts.filter((p) => p.authorId === user.id), [posts, user.id]);
   const replies = useMemo(
     () =>
@@ -89,9 +106,10 @@ export default function Profile() {
   }, [userPosts]);
   const liked = useMemo(() => posts.filter((p) => p.liked), [posts]);
 
-  const shown = tab === "posts" ? userPosts : tab === "replies" ? replies : tab === "saved" ? (isMe ? bookmarks : liked) : [];
+  const shown = profileApiId ? profileItems : tab === "posts" ? userPosts : tab === "replies" ? replies : tab === "likes" ? liked : tab === "saved" ? (isMe ? bookmarks : []) : [];
 
   const following = isFollowing(user.id);
+  const followRequested = isFollowRequested(user.id);
 
   const copyProfileLink = async () => {
     const ok = await copyText(`https://campuslaugh.app/@${user.username}`);
@@ -141,8 +159,8 @@ export default function Profile() {
           {isMe ? (
             <Button size="xs" variant="outline" onClick={() => setEditing(true)}>Edit</Button>
           ) : (
-            <Button size="xs" variant={following ? "outline" : "brand"} onClick={() => toggleFollow(user.id)}>
-              {following ? "Following" : "Follow"}
+            <Button size="xs" variant={following || followRequested ? "outline" : "brand"} onClick={() => toggleFollow(user.id)}>
+              {following ? "Following" : followRequested ? "Requested" : "Follow"}
             </Button>
           )}
         </span>
@@ -182,15 +200,12 @@ export default function Profile() {
             ) : (
               <>
                 <Button
-                  variant={following ? "outline" : "brand"}
+                  variant={following || followRequested ? "outline" : "brand"}
                   size="sm"
                   icon={following ? <Check className="h-4 w-4" /> : <UserPlus className="h-4 w-4" />}
-                  onClick={() => {
-                    const now = toggleFollow(user.id);
-                    toast({ title: now ? `Following ${user.name}` : `Unfollowed ${user.name}`, tone: now ? "success" : "info" });
-                  }}
+                  onClick={() => toggleFollow(user.id)}
                 >
-                  {following ? "Following" : "Follow"}
+                  {following ? "Following" : followRequested ? "Cancel request" : "Follow"}
                 </Button>
                 <Button
                   variant="glass"
@@ -223,19 +238,15 @@ export default function Profile() {
               </span>
             )}
             <span className="inline-flex items-center gap-1.5">
-              <Calendar className="h-3.5 w-3.5 text-brand" /> Joined September 2024
-            </span>
-            <span className="inline-flex items-center gap-1.5">
               <Link2 className="h-3.5 w-3.5 text-brand" /> campuslaugh.app/@{user.username}
             </span>
           </div>
 
           <div className="mt-3.5 flex flex-wrap gap-4">
             {[
-              { label: "Posts", value: userPosts.length },
-              { label: "Followers", value: user.followers },
-              { label: "Following", value: user.following },
-              { label: "Laughs given", value: 12840 },
+              { label: "Posts", value: profileStats?.posts ?? userPosts.length },
+              { label: "Followers", value: profileStats?.followers ?? user.followers },
+              { label: "Following", value: profileStats?.following ?? user.following },
             ].map((s) => (
               <button
                 key={s.label}
@@ -250,18 +261,7 @@ export default function Profile() {
             ))}
           </div>
 
-          {!isMe && (
-            <div className="mt-3.5 flex flex-wrap items-center gap-1.5">
-              <Badge tone="brand">{user.campus}</Badge>
-              {user.online ? <Badge tone="mint">Online now</Badge> : <Badge>Last seen {user.lastSeen ?? "recently"}</Badge>}
-              <div className="ml-1 flex -space-x-2">
-                {userArray.slice(0, 3).map((u) => (
-                  <Avatar key={u.id} src={u.avatar} name={u.name} size={22} />
-                ))}
-              </div>
-              <span className="text-[11.5px] font-semibold text-ink3">Followed by Zainab, Kwame and 12 others</span>
-            </div>
-          )}
+          {user.campus && <div className="mt-3.5"><Badge tone="brand">{user.campus}</Badge></div>}
         </div>
 
         {/* tabs */}
@@ -296,16 +296,16 @@ export default function Profile() {
                 exit={{ opacity: 0, y: -8 }}
                 transition={springSoftLocal}
               >
-                {media.length === 0 ? (
+                {profileLoading ? <p className="p-6 text-center text-sm text-ink3">Loading media…</p> : profileError ? <EmptyState icon={<ImageIcon className="h-6 w-6" />} title="Media is unavailable" body="We couldn’t load this profile’s posts." /> : (profileApiId ? profileItems.flatMap((post) => (post.media ?? []).map((item) => ({ media: item, postId: post.id }))) : media).length === 0 ? (
                   <EmptyState icon={<ImageIcon className="h-6 w-6" />} title="No media yet" body="Photos and clips shared by this profile will collect here." />
                 ) : (
                   <div className="grid grid-cols-3 gap-1.5">
-                    {media.map((it, i) => (
+                    {(profileApiId ? profileItems.flatMap((post) => (post.media ?? []).map((item) => ({ media: item, postId: post.id }))) : media).map((it, i, all) => (
                       <motion.button
                         key={it.media.id}
                         whileHover={{ scale: 1.03 }}
                         whileTap={{ scale: 0.96 }}
-                        onClick={() => setViewer({ items: media.map((x) => x.media), index: i })}
+                        onClick={() => setViewer({ items: all.map((x) => x.media), index: i })}
                         className="relative aspect-square overflow-hidden rounded-2xl border border-line"
                       >
                         {it.media.kind === "video" ? (
@@ -323,17 +323,25 @@ export default function Profile() {
                   </div>
                 )}
               </motion.div>
+            ) : profileLoading ? (
+              <div className="glass rounded-2xl p-6 text-center text-sm text-ink3">Loading profile activity…</div>
+            ) : profileError ? (
+              <EmptyState icon={<ShieldAlert className="h-6 w-6" />} title="Profile activity is unavailable" body="This account may be private, or the connection failed. Try again by reloading the profile." />
             ) : shown.length === 0 ? (
               <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 <EmptyState
                   icon={tab === "saved" ? <Bookmark className="h-6 w-6" /> : <MessageCircle className="h-6 w-6" />}
-                  title={
+                    title={
                     tab === "saved"
                       ? isMe
-                        ? "No bookmarks yet"
-                        : "Liked posts are private"
+                        ? "No saved posts yet"
+                        : "Saved posts are private"
                       : tab === "replies"
                         ? "No replies yet"
+                        : tab === "likes"
+                          ? "No liked posts yet"
+                          : tab === "reposts"
+                            ? "No reposts yet"
                         : "No posts yet"
                   }
                   body={
@@ -383,21 +391,28 @@ export default function Profile() {
             : [
                 { id: "share", label: "Copy profile link", icon: <Link2 className="h-4 w-4" />, onSelect: () => void copyProfileLink() },
                 { id: "msg", label: "Send message", icon: <MessageCircle className="h-4 w-4" />, onSelect: () => { void startConversation(user.id).then((id) => navigate(`/chats/${id}`)).catch(() => undefined); } },
-                { id: "mute", label: `Mute @${user.username}`, icon: <ShieldAlert className="h-4 w-4" />, onSelect: () => toast({ title: `Muted ${user.name}`, description: "Manage in Settings → Safety", tone: "info" }) },
+                { id: "mute", label: `Mute @${user.username}`, icon: <ShieldAlert className="h-4 w-4" />, onSelect: () => toast({ title: "User muting is unavailable", description: "This interaction is not connected to the backend yet.", tone: "warning" }) },
                 {
                   id: "block",
                   label: `Block ${user.name}`,
                   icon: <ShieldAlert className="h-4 w-4" />,
                   tone: "danger",
-                  onSelect: () =>
-                    void confirm({ title: `Block ${user.name}?`, message: "They won't see your posts or message you in this demo session.", confirmLabel: "Block", tone: "danger" }).then((ok) => ok && toast({ title: `${user.name} blocked`, tone: "warning" })),
+                  onSelect: () => void confirm({ title: `Block ${user.name}?`, message: "This removes your follow connection and prevents further follows, post interactions, and messages between your accounts.", confirmLabel: "Block", tone: "danger" }).then(async (ok) => {
+                    if (!ok) return;
+                    try { await request(`/users/${user.id}/block`, { method: "POST" }); toast({ title: `${user.name} blocked`, tone: "success" }); }
+                    catch (error) { toast({ title: "Could not block this user", description: error instanceof Error ? error.message : "Try again.", tone: "error" }); }
+                  }),
                 },
-                { id: "report", label: "Report profile", icon: <ShieldAlert className="h-4 w-4" />, tone: "danger", onSelect: () => void actionSheet({ title: "Report profile", message: "Choose a reason — queued locally in this demo.", actions: [{ id: "spam", label: "Spam or scam" }, { id: "harass", label: "Harassment" }, { id: "fake", label: "Impersonation" }, { id: "other", label: "Something else" }] }).then((r) => r && toast({ title: "Report submitted", description: r, tone: "warning" })) },
+                { id: "report", label: "Report profile", icon: <ShieldAlert className="h-4 w-4" />, tone: "danger", onSelect: () => void actionSheet({ title: "Report profile", message: "Select a reason to send a report to moderation.", actions: [{ id: "spam", label: "Spam or scam" }, { id: "harass", label: "Harassment" }, { id: "fake", label: "Impersonation" }, { id: "other", label: "Something else" }] }).then(async (r) => {
+                  if (!r) return;
+                  try { await backend.report("user", user.id, r); toast({ title: "Report submitted", description: "Thanks for helping keep CampusLaugh safe.", tone: "success" }); }
+                  catch (error) { toast({ title: "Report wasn’t sent", description: error instanceof Error ? error.message : "Try again.", tone: "error" }); }
+                }) },
               ]
         }
       />
 
-      <EditProfileModal open={editing} onClose={() => setEditing(false)} user={user} onSave={(patch) => { updateProfile(patch); toast({ title: "Profile updated", tone: "success" }); }} />
+      <EditProfileModal open={editing} onClose={() => setEditing(false)} user={user} onSave={async (patch) => { try { await updateProfile(patch); toast({ title: "Profile updated", tone: "success" }); setEditing(false); } catch (error) { toast({ title: "Profile change wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }); } }} />
 
       <AnimatePresence>
         {viewer && (
@@ -421,30 +436,45 @@ function EditProfileModal({
   open: boolean;
   onClose: () => void;
   user: User;
-  onSave: (patch: Partial<User>) => void;
+  onSave: (patch: Partial<User>) => Promise<void>;
 }) {
+  const { toast } = useSystem();
   const [name, setName] = useState(user.name);
   const [bio, setBio] = useState(user.bio ?? "");
-  const [institution, setInstitution] = useState(user.institution);
   const [course, setCourse] = useState(user.course ?? "");
+  const [username, setUsername] = useState(user.username);
+  const [department, setDepartment] = useState(user.department ?? "");
+  const [location, setLocation] = useState(user.location ?? "");
+  const [website, setWebsite] = useState(user.website ?? "");
   const [avatar, setAvatar] = useState(user.avatar);
+  const [cover, setCover] = useState(user.cover ?? "");
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const coverFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) {
       setName(user.name);
       setBio(user.bio ?? "");
-      setInstitution(user.institution);
       setCourse(user.course ?? "");
+      setUsername(user.username);
+      setDepartment(user.department ?? "");
+      setLocation(user.location ?? "");
+      setWebsite(user.website ?? "");
       setAvatar(user.avatar);
+      setCover(user.cover ?? "");
     }
   }, [open, user]);
 
-  const onFile = (f: FileList | null) => {
+  const onFile = async (f: FileList | null, context: "profile-avatar" | "profile-cover") => {
     const file = f?.[0];
     if (!file) return;
-    if (!file.type.startsWith("image/")) return;
-    setAvatar(URL.createObjectURL(file));
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type) || file.size > 10 * 1024 * 1024) { toast({ title: "Choose an image under 10 MB", tone: "error" }); return; }
+    setUploading(true);
+    try { const uploaded = await uploadMedia(file, undefined, { context }); context === "profile-avatar" ? setAvatar(uploaded.url) : setCover(uploaded.url); }
+    catch (error) { toast({ title: "Profile image upload failed", description: error instanceof Error ? error.message : "Try again.", tone: "error" }); }
+    finally { setUploading(false); }
   };
 
   return (
@@ -452,17 +482,18 @@ function EditProfileModal({
       open={open}
       onClose={onClose}
       title="Edit profile"
-      subtitle="Changes are saved to this browser only (frontend demo)."
+      subtitle="Profile details and profile images are saved to your CampusLaugh account."
       footer={
         <div className="flex gap-2">
           <Button variant="outline" block onClick={onClose}>Cancel</Button>
-          <Button variant="brand" block icon={<Check className="h-4 w-4" />} onClick={() => { onSave({ name, bio, institution, course, avatar }); onClose(); }}>
-            Save changes
+          <Button variant="brand" block loading={saving} disabled={uploading} icon={<Check className="h-4 w-4" />} onClick={async () => { setSaving(true); try { await onSave({ name, username, bio, course, department, location, website, avatar, cover }); } finally { setSaving(false); } }}>
+            {uploading ? "Uploading image…" : "Save changes"}
           </Button>
         </div>
       }
     >
-      <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { onFile(e.target.files); e.target.value = ""; }} />
+      <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onChange={(e) => { void onFile(e.target.files, "profile-avatar"); e.target.value = ""; }} />
+      <input ref={coverFileRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onChange={(e) => { void onFile(e.target.files, "profile-cover"); e.target.value = ""; }} />
 
       <div className="space-y-4 pb-1">
         <div className="flex items-center gap-3">
@@ -471,33 +502,25 @@ function EditProfileModal({
             <Button size="sm" variant="glass" icon={<ImageIcon className="h-4 w-4" />} onClick={() => fileRef.current?.click()}>
               Upload photo
             </Button>
-            <span className="text-[11px] font-semibold text-ink3">or pick a sample below</span>
           </div>
         </div>
 
-        <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-          {SAMPLE_AVATARS.map((s) => (
-            <motion.button
-              key={s}
-              whileTap={{ scale: 0.9 }}
-              onClick={() => setAvatar(s)}
-              className={cn("relative h-12 w-12 shrink-0 overflow-hidden rounded-full border-2", avatar === s ? "border-brand" : "border-line")}
-            >
-              <img src={s} alt="Sample avatar" loading="lazy" className="h-full w-full object-cover" />
-            </motion.button>
-          ))}
+        <div className="flex items-center justify-between rounded-2xl border border-line p-3">
+          <div><p className="text-xs font-bold text-ink">Cover image</p><p className="text-[11px] text-ink3">JPG, PNG, WEBP or GIF · up to 10 MB</p></div>
+          <Button size="sm" variant="glass" disabled={uploading} onClick={() => coverFileRef.current?.click()}>{cover ? "Change cover" : "Upload cover"}</Button>
         </div>
 
         <Field label="Full name" value={name} onChange={setName} maxLength={40} />
         <Field label="Bio" value={bio} onChange={setBio} maxLength={160} multiline placeholder="Tell your campus who you are" />
-        <Field label="Institution" value={institution} onChange={setInstitution} maxLength={60} />
+        <div className="glass rounded-2xl p-3"><p className="text-[12px] font-bold text-ink">{user.institution}</p><p className="mt-0.5 text-[11.5px] text-ink3">Institution changes require directory review.</p></div>
         <Field label="Course / level" value={course} onChange={setCourse} maxLength={60} placeholder="B.Sc Computer Science · 400 Level" />
+        <Field label="Department" value={department} onChange={setDepartment} maxLength={120} placeholder="Computer Science" />
+        <Field label="Location" value={location} onChange={setLocation} maxLength={120} placeholder="Lagos, Nigeria" />
+        <Field label="Website" value={website} onChange={setWebsite} maxLength={240} placeholder="https://example.com" />
 
         <div className="glass rounded-2xl p-3">
-          <p className="text-[12px] font-bold text-ink">@{(name || "student").toLowerCase().replace(/[^a-z0-9]/g, "")}</p>
-          <p className="mt-0.5 text-[11.5px] text-ink3">
-            Usernames stay fixed in this demo build — @{user.username}
-          </p>
+          <Field label="Username" value={username} onChange={setUsername} maxLength={24} placeholder="your_username" />
+          <p className="mt-0.5 text-[11.5px] text-ink3">Use 3–24 letters, numbers, dots or underscores.</p>
         </div>
       </div>
     </Modal>
@@ -554,7 +577,22 @@ function Field({
 /** Simple bookmarks screen (reuses the profile list styles). */
 export function BookmarksPage() {
   const navigate = useNavigate();
-  const { bookmarks } = useStore();
+  const { bookmarks, apiUserId, cacheUser } = useStore();
+  const [items, setItems] = useState<import("@/types").Post[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!apiUserId) return;
+    let live = true;
+    setLoading(true); setFailed(false);
+    void backend.getProfilePosts(apiUserId, "saved").then((result) => {
+      if (!live) return;
+      result.authors.forEach(cacheUser);
+      setItems(result.items);
+    }).catch(() => { if (live) setFailed(true); }).finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [apiUserId, cacheUser]);
+  const savedPosts = apiUserId ? items : bookmarks;
   return (
     <motion.div variants={pageVariants} initial="initial" animate="enter" exit="exit" className="px-3 pb-28 lg:px-0 lg:pb-8">
       <div className="mb-3 flex items-center gap-2 pt-2">
@@ -562,22 +600,22 @@ export function BookmarksPage() {
           <h1 className="font-display text-[26px] font-extrabold leading-none tracking-[-0.035em] text-ink lg:text-[32px]">
             Bookmarks
           </h1>
-          <p className="mt-1.5 text-[12.5px] font-semibold text-ink2">{bookmarks.length} saved posts</p>
+          <p className="mt-1.5 text-[12.5px] font-semibold text-ink2">{savedPosts.length} saved posts</p>
         </div>
         <Button size="sm" variant="outline" onClick={() => navigate("/profile")}>Back to profile</Button>
       </div>
 
-      {bookmarks.length === 0 ? (
+      {loading ? <div className="glass rounded-2xl p-6 text-center text-sm text-ink3">Loading saved posts…</div> : failed ? <EmptyState icon={<Bookmark className="h-6 w-6" />} title="Saved posts are unavailable" body="We couldn’t load your saved posts. Sign in again or retry." action={<Button size="sm" variant="brand" onClick={() => navigate(0)}>Retry</Button>} /> : savedPosts.length === 0 ? (
         <EmptyState
           icon={<Bookmark className="h-6 w-6" />}
           title="Nothing saved yet"
-          body="Tap the bookmark icon on any post and it lands here — stored in this browser."
+          body="Posts you save from the feed or profile will appear here."
           action={<Button size="sm" variant="brand" onClick={() => navigate("/home")}>Browse the feed</Button>}
         />
       ) : (
         <div className="space-y-3">
           <AnimatePresence>
-            {bookmarks.map((p) => (
+            {savedPosts.map((p) => (
               <motion.div key={p.id} layout exit={{ opacity: 0, scale: 0.95 }}>
                 <PostCard post={p} onOpenProfile={(id) => navigate(`/profile/${id}`)} />
               </motion.div>

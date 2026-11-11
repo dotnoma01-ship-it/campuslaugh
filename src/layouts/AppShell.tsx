@@ -1,5 +1,5 @@
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AmbientBackdrop } from "@/components/ui/Ambient";
 import { BottomNav, MobileHeader, Sidebar } from "@/components/navigation/Nav";
@@ -7,7 +7,6 @@ import { GlobalOverlays } from "@/components/overlays/GlobalOverlays";
 import { BannerHost, Island } from "@/components/notifications/SystemUI";
 import { Toaster } from "@/components/ui/Toaster";
 import { useStore } from "@/context/StoreContext";
-import { useSystem } from "@/context/SystemContext";
 import { useTheme } from "@/context/ThemeContext";
 import Home from "@/pages/Home";
 import Explore from "@/pages/Explore";
@@ -15,7 +14,7 @@ import Chats from "@/pages/Chats";
 import NotificationsPage from "@/pages/Notifications";
 import Profile, { BookmarksPage } from "@/pages/Profile";
 import SettingsPage from "@/pages/Settings";
-import { LoginPage, RegisterPage, ForgotPasswordPage } from "@/pages/auth/AuthPages";
+import { LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage } from "@/pages/auth/AuthPages";
 import { getAccessToken, request, setAccessToken } from "@/services/http";
 import { useState } from "react";
 
@@ -32,19 +31,7 @@ const TITLES: Record<string, string> = {
 export default function AppShell() {
   const location = useLocation();
   const { settings } = useTheme();
-  const { setAmbient } = useStore();
-  const { toast } = useSystem();
   const [sessionReady, setSessionReady] = useState(false);
-  const synced = useRef(false);
-  const errored = useRef(false);
-
-  /* keep the demo activity stream in sync with the saved preference */
-  useEffect(() => {
-    if (synced.current) return;
-    synced.current = true;
-    setAmbient(settings.demoActivity);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     let live = true;
@@ -56,25 +43,11 @@ export default function AppShell() {
     return () => { live = false; };
   }, []);
 
-  if (["/login", "/register", "/forgot-password"].includes(location.pathname)) {
-    return <Routes><Route path="/login" element={<LoginPage/>}/><Route path="/register" element={<RegisterPage/>}/><Route path="/forgot-password" element={<ForgotPasswordPage/>}/><Route path="*" element={<LoginPage/>}/></Routes>;
+  if (["/login", "/register", "/forgot-password", "/reset-password"].includes(location.pathname)) {
+    return <Routes><Route path="/login" element={<LoginPage/>}/><Route path="/register" element={<RegisterPage/>}/><Route path="/forgot-password" element={<ForgotPasswordPage/>}/><Route path="/reset-password" element={<ResetPasswordPage/>}/><Route path="*" element={<LoginPage/>}/></Routes>;
   }
   if (!sessionReady) return <div className="grid min-h-[100dvh] place-items-center bg-bg text-ink2"><div className="animate-pulse text-sm font-semibold">Restoring your campus session…</div></div>;
   if (!getAccessToken()) return <Navigate to="/login" replace state={{from:location.pathname}}/>;
-
-  /* surface a connection warning when the user simulates being offline */
-  useEffect(() => {
-    if (settings.simulateErrors && !errored.current) {
-      errored.current = true;
-      toast({
-        title: "Connection unavailable",
-        description: "Simulated offline mode is on — feeds will show an error state.",
-        tone: "warning",
-        duration: 5200,
-      });
-    }
-    if (!settings.simulateErrors) errored.current = false;
-  }, [settings.simulateErrors, toast]);
 
   const isChatThread = /^\/chats\/.+/.test(location.pathname);
   const root = `/${location.pathname.split("/")[1] ?? ""}`;
@@ -120,7 +93,7 @@ export default function AppShell() {
   );
 }
 
-/** Liquid-glass boot splash shown while the demo store hydrates. */
+/** Liquid-glass boot splash shown while the application session hydrates. */
 export function BootScreen() {
   const { ready } = useStore();
   return (

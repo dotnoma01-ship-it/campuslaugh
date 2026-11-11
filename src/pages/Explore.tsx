@@ -18,7 +18,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useStore } from "@/context/StoreContext";
 import { useSystem } from "@/context/SystemContext";
-import { campusAnnouncements, institutions, recentSearches as seedSearches, trending, userArray } from "@/data/mock";
 import type { MediaItem, Post, User } from "@/types";
 import { cn, compact } from "@/utils/format";
 import { Avatar, Badge, Button, Chip, EmptyState, Segmented } from "@/components/ui/primitives";
@@ -34,7 +33,7 @@ type Scope = "all" | "posts" | "people" | "tags";
 export default function Explore() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const { posts, addRecentSearch, recentSearches, clearRecentSearches, toggleFollow, isFollowing, userById, cacheUser } = useStore();
+  const { posts, addRecentSearch, recentSearches, clearRecentSearches, cacheUser, toggleFollow, isFollowing, userById } = useStore();
   const { toast } = useSystem();
 
   const [query, setQuery] = useState(params.get("q") ?? "");
@@ -45,6 +44,10 @@ export default function Explore() {
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteError, setRemoteError] = useState(false);
   const [retrySearch, setRetrySearch] = useState(0);
+  const [discovery, setDiscovery] = useState<Awaited<ReturnType<typeof backend.getDiscovery>> | null>(null);
+  const [discoveryLoading, setDiscoveryLoading] = useState(true);
+  const [discoveryError, setDiscoveryError] = useState(false);
+  const [retryDiscovery, setRetryDiscovery] = useState(0);
 
   useEffect(() => {
     const q = params.get("q");
@@ -54,6 +57,17 @@ export default function Explore() {
 
   const q = query.trim().toLowerCase();
   const authenticated = Boolean(getAccessToken());
+
+  useEffect(() => {
+    if (!authenticated) { setDiscovery(null); setDiscoveryLoading(false); return; }
+    let live = true;
+    setDiscoveryLoading(true);
+    setDiscoveryError(false);
+    void backend.getDiscovery().then((value) => {
+      if (live) { value.people.forEach(cacheUser); setDiscovery(value); }
+    }).catch(() => { if (live) setDiscoveryError(true); }).finally(() => { if (live) setDiscoveryLoading(false); });
+    return () => { live = false; };
+  }, [authenticated, cacheUser, retryDiscovery]);
 
   useEffect(() => {
     if (!q || !authenticated) {
@@ -82,29 +96,13 @@ export default function Explore() {
       const current = remoteResults?.query === q ? remoteResults : null;
       return { posts: current?.posts ?? [], people: current?.people ?? [], tags: current?.tags ?? [], campuses: [] };
     }
-    return {
-      posts: posts.filter(
-        (p) =>
-          p.text.toLowerCase().includes(q) ||
-          p.hashtags.some((h) => h.toLowerCase().includes(q.replace("#", ""))) ||
-          p.campus.toLowerCase().includes(q),
-      ),
-      people: userArray.filter(
-        (u) =>
-          u.name.toLowerCase().includes(q) ||
-          u.username.toLowerCase().includes(q) ||
-          u.institution.toLowerCase().includes(q),
-      ),
-      tags: trending.filter((t) => t.tag.toLowerCase().includes(q.replace("#", ""))).map((t) => t.tag),
-      campuses: institutions.filter((i) => i.toLowerCase().includes(q)),
-    };
-  }, [q, posts, authenticated, remoteResults]);
+    return { posts: [], people: [], tags: [] as string[], campuses: [] as string[] };
+  }, [q, authenticated, remoteResults]);
 
   const suggestions = useMemo(() => {
     const base = [
-      ...trending.slice(0, 4).map((t) => ({ kind: "tag" as const, label: `#${t.tag}`, meta: `${compact(t.posts)} posts` })),
-      ...userArray.slice(1, 4).map((u) => ({ kind: "user" as const, label: `@${u.username}`, meta: u.institution })),
-      { kind: "campus" as const, label: "UNILAG · Akoka", meta: "Your campus" },
+      ...(discovery?.trends.slice(0, 4) ?? []).map((t) => ({ kind: "tag" as const, label: `#${t.tag}`, meta: `${compact(t.posts)} posts` })),
+      ...(discovery?.people.slice(0, 3) ?? []).map((u) => ({ kind: "user" as const, label: `@${u.username}`, meta: u.institution })),
     ];
     if (!q) return base;
     return [
@@ -112,7 +110,7 @@ export default function Explore() {
       ...results.people.slice(0, 4).map((u) => ({ kind: "user" as const, label: `@${u.username}`, meta: u.name })),
       ...results.campuses.slice(0, 3).map((c) => ({ kind: "campus" as const, label: c, meta: "Institution" })),
     ];
-  }, [q, results]);
+  }, [q, results, discovery]);
 
   const hotDiscussions = useMemo(
     () => [...posts].sort((a, b) => b.comments.length - a.comments.length).slice(0, 3),
@@ -201,7 +199,7 @@ export default function Explore() {
                     </div>
                   )}
                   {!searching &&
-                    (recentSearches.length ? recentSearches : seedSearches).map((term) => (
+                    recentSearches.map((term) => (
                       <button
                         key={term}
                         onMouseDown={() => submit(term)}
@@ -267,13 +265,6 @@ export default function Explore() {
                   icon={<Search className="h-6 w-6" />}
                   title={`Nothing found for “${query}”`}
                   body="Try a hashtag like #HostelChronicles, a student's @username, or an institution name."
-                  action={
-                    <div className="flex flex-wrap justify-center gap-2">
-                      {trending.slice(0, 3).map((t) => (
-                        <Chip key={t.tag} onClick={() => submit(t.tag)}>#{t.tag}</Chip>
-                      ))}
-                    </div>
-                  }
                 />
               ) : (
                 <div className="space-y-3">
@@ -302,9 +293,10 @@ export default function Explore() {
             <motion.div key="browse" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-4">
               {/* trending */}
               <section>
-                <SectionTitle icon={<Flame className="h-4 w-4" />} title="Trending across campuses" sub="Updated for the demo feed" />
+                <SectionTitle icon={<Flame className="h-4 w-4" />} title="Trending across campuses" sub="Based on hashtags used by students" />
+                {discoveryLoading ? <div className="glass rounded-[22px] p-4 text-sm text-ink2">Loading trends…</div> : discoveryError ? <EmptyState icon={<Search className="h-6 w-6" />} title="Discovery is unavailable" body="We couldn’t load current campus activity." action={<Button size="sm" variant="brand" onClick={() => setRetryDiscovery((value) => value + 1)}>Try again</Button>} /> : !discovery?.trends.length ? <p className="px-1 text-sm text-ink3">Nothing trending right now.</p> : (
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                  {trending.map((t, i) => (
+                  {discovery.trends.map((t, i) => (
                     <motion.button
                       key={t.tag}
                       initial={{ opacity: 0, y: 14 }}
@@ -317,36 +309,39 @@ export default function Explore() {
                     >
                       <span className="flex items-center justify-between">
                         <span className="text-[11px] font-extrabold uppercase tracking-wider text-ink3">#{i + 1} trending</span>
-                        <Badge tone={t.delta.startsWith("+") ? "mint" : "coral"}>{t.delta}</Badge>
+                        <Badge tone="neutral">{compact(t.posts)} posts</Badge>
                       </span>
                       <span className="mt-2 block font-display text-[17px] font-extrabold tracking-[-0.03em] text-ink">
                         #{t.tag}
                       </span>
-                      <span className="mt-0.5 block text-[12px] text-ink2">{compact(t.posts)} posts</span>
+                      <span className="mt-0.5 block text-[12px] text-ink2">{compact(t.posts)} uses</span>
                       <span className="pointer-events-none absolute -bottom-6 -right-4 h-20 w-20 rounded-full bg-brand/12 blur-xl" />
                     </motion.button>
                   ))}
                 </div>
+                )}
               </section>
 
               {/* people */}
               <section>
-                <SectionTitle icon={<UserPlus className="h-4 w-4" />} title="Students you should know" sub="Across 11 institutions" />
+                <SectionTitle icon={<UserPlus className="h-4 w-4" />} title="Students you should know" sub="Active CampusLaugh accounts" />
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {userArray.filter((u) => u.id !== "me").slice(0, 6).map((u) => (
+                  {(discovery?.people ?? []).filter((u) => u.id !== "me").slice(0, 6).map((u) => (
                     <PersonCard key={u.id} userId={u.id} />
                   ))}
                 </div>
+                {!discoveryLoading && !discoveryError && !discovery?.people.length && <p className="px-1 text-sm text-ink3">No students to suggest yet.</p>}
               </section>
 
               {/* discussions */}
               <section>
-                <SectionTitle icon={<MessageCircle className="h-4 w-4" />} title="Popular discussions" sub="Most replies right now" />
+                <SectionTitle icon={<MessageCircle className="h-4 w-4" />} title="Popular discussions" sub="From posts currently loaded in your feed" />
                 <div className="space-y-3">
                   {hotDiscussions.map((p) => (
                     <PostCard key={p.id} post={p} dense onOpenProfile={(id) => navigate(`/profile/${id}`)} />
                   ))}
                 </div>
+                {!hotDiscussions.length && <p className="px-1 text-sm text-ink3">No discussions yet.</p>}
               </section>
 
               {/* media mosaic */}
@@ -378,17 +373,17 @@ export default function Explore() {
 
               {/* announcements */}
               <section>
-                <SectionTitle icon={<Sparkles className="h-4 w-4" />} title="Campus announcements" sub="Official notices" />
+                <SectionTitle icon={<Sparkles className="h-4 w-4" />} title="Campus announcements" sub="Announcements provided by CampusLaugh" />
                 <div className="grid gap-2 sm:grid-cols-3">
-                  {campusAnnouncements.map((a) => (
-                    <div key={a.id} className="glass rounded-[22px] p-4">
-                      <Badge tone="brand">{a.time}</Badge>
+                  {(discovery?.announcements ?? []).map((a) => (
+                    <div key={a._id} className="glass rounded-[22px] p-4">
+                      <Badge tone="brand">{new Date(a.createdAt).toLocaleDateString()}</Badge>
                       <h3 className="mt-2 font-display text-[15px] font-extrabold leading-tight text-ink">{a.title}</h3>
                       <p className="mt-1 text-[12.5px] leading-snug text-ink2">{a.body}</p>
-                      <p className="mt-2 text-[11px] font-bold uppercase tracking-wide text-ink3">{a.campus}</p>
                     </div>
                   ))}
                 </div>
+                {!discoveryLoading && !discoveryError && !discovery?.announcements.length && <p className="px-1 text-sm text-ink3">No campus announcements yet.</p>}
               </section>
             </motion.div>
           )}

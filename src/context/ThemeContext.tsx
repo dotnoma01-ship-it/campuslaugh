@@ -7,8 +7,6 @@ export const defaultSettings: Settings = {
   accent: "lime",
   whoCanMessage: "campus",
   onlineVisibility: true,
-  readReceipts: true,
-  institutionVisibility: true,
   notifyMessages: true,
   notifyLikes: true,
   notifyComments: true,
@@ -23,8 +21,6 @@ export const defaultSettings: Settings = {
   mediaAutoplay: true,
   wallpaper: "midnight",
   compactFeed: false,
-  simulateErrors: false,
-  demoActivity: true,
 };
 
 interface ThemeCtx {

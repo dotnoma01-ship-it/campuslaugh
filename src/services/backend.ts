@@ -1,13 +1,15 @@
 import { request } from '@/services/http';
 import type { AppNotification, Comment, Conversation, Message, Post, User } from '@/types';
 
-type ApiUser = { _id?: string; id?: string; name?: string; username?: string; institution?: string; campus?: string; course?: string; avatar?: string; cover?: string; bio?: string; followers?: unknown[]; following?: unknown[]; verified?: boolean };
-type ApiPost = { _id: string; authorId: string | ApiUser; text: string; media?: Post['media']; anonymous?: boolean; hashtags?: string[]; createdAt: string; likes?: unknown[]; reposts?: unknown[]; bookmarks?: unknown[]; likedByMe?: boolean; repostedByMe?: boolean; bookmarkedByMe?: boolean; campus?: string; comments?: Comment[] };
+type ApiUser = { _id?: string; id?: string; name?: string; username?: string; institution?: string; campus?: string; course?: string; department?: string; location?: string; website?: string; avatar?: string; cover?: string; bio?: string; followers?: unknown[]; following?: unknown[]; followersCount?: number; followingCount?: number; verified?: boolean; isPrivate?: boolean; inaccessible?: boolean; privacy?: Record<string, unknown> };
+type ApiPost = { _id: string; authorId: string | ApiUser; text: string; media?: Post['media']; anonymous?: boolean; hashtags?: string[]; createdAt: string; likes?: unknown[]; reposts?: unknown[]; bookmarks?: unknown[]; likedByMe?: boolean; repostedByMe?: boolean; bookmarkedByMe?: boolean; campus?: string; comments?: Comment[]; forwardedFrom?: { senderName?: string } };
 type ApiComment = { _id: string; authorId: string | ApiUser; parentId?: string; text: string; createdAt: string; likes?: unknown[]; likedByMe?: boolean; deleted?: boolean };
-type ApiNotification = { _id: string; actorId?: string | ApiUser; kind: string; title?: string; body?: string; targetId?: string; createdAt: string; readAt?: string | null };
-type ApiMessage = { _id: string; senderId: string | ApiUser; text?: string; kind?: Message['kind']; createdAt: string; replyTo?: string | { _id: string; text?: string; senderId?: string }; reactions?: { userId: string; emoji: string }[]; readBy?: string[]; deliveredTo?: string[]; editedAt?: string; deleted?: boolean };
-type ApiConversation = { _id: string; members: (string | ApiUser)[]; group?: boolean; title?: string; pinnedBy?: string[]; mutedBy?: string[]; archivedBy?: string[]; lastMessageAt?: string };
-const mapUser = (u: ApiUser): User => ({ id: String(u._id ?? u.id), name: u.name ?? 'Campus student', username: u.username ?? 'student', institution: u.institution ?? '', campus: u.campus ?? u.institution ?? '', course: u.course, avatar: u.avatar ?? '', cover: u.cover, bio: u.bio, followers: u.followers?.length ?? 0, following: u.following?.length ?? 0, verified: u.verified });
+type ApiNotification = { _id: string; actorId?: string | ApiUser; kind: string; title?: string; body?: string; targetId?: string; conversationId?: string; createdAt: string; readAt?: string | null };
+type ApiMessage = { _id: string; senderId: string | ApiUser; text?: string; kind?: Message['kind']; createdAt: string; attachments?: { url: string; publicId: string; resourceType: string; format?: string; bytes?: number }[]; forwardedFrom?: { messageId: string; senderId: string | ApiUser; senderName?: string }; replyTo?: string | { _id: string; text?: string; senderId?: string | ApiUser }; reactions?: { userId: string; emoji: string }[]; readBy?: string[]; deliveredTo?: string[]; editedAt?: string; deleted?: boolean };
+type ApiConversation = { _id: string; members: (string | ApiUser)[]; group?: boolean; title?: string; image?: string; unread?: number; ownerId?: string; admins?: string[]; pinnedBy?: string[]; mutedBy?: string[]; archivedBy?: string[]; lastMessageAt?: string };
+type ApiTrend = { name: string; uses: number };
+type ApiAnnouncement = { _id: string; title: string; body: string; institutionIds?: string[]; createdAt: string; pinned?: boolean };
+const mapUser = (u: ApiUser): User => ({ id: String(u._id ?? u.id), name: u.name ?? 'Campus student', username: u.username ?? 'student', institution: u.institution ?? '', campus: u.campus ?? u.institution ?? '', course: u.course, department: u.department, location: u.location, website: u.website, avatar: u.avatar ?? '', cover: u.cover, bio: u.bio, followers: u.followersCount ?? u.followers?.length ?? 0, following: u.followingCount ?? u.following?.length ?? 0, verified: u.verified, isPrivate: u.isPrivate, inaccessible: u.inaccessible });
 let currentApiUser: User | null = null;
 const conversationUserCache = new Map<string, User>();
 const mapPost = (p: ApiPost): { post: Post; author: User } => {
@@ -17,11 +19,17 @@ const mapPost = (p: ApiPost): { post: Post; author: User } => {
   return { author, post: { id: p._id, authorId, anonymous: p.anonymous, text: p.text, media: p.media ?? [], hashtags: p.hashtags ?? [], createdAt: new Date(p.createdAt).getTime(), likes: p.likes?.length ?? 0, liked: p.likedByMe, reposts: p.reposts?.length ?? 0, reposted: p.repostedByMe, bookmarked: p.bookmarkedByMe, views: 0, comments: p.comments ?? [], campus: p.campus ?? author.campus } };
 };
 const mapComment = (c: ApiComment): Comment => { const authorId = typeof c.authorId === 'string' ? c.authorId : String(c.authorId._id ?? c.authorId.id); return { id: c._id, authorId: currentApiUser?.id === authorId ? 'me' : authorId, text: c.deleted ? 'This comment was removed' : c.text, createdAt: new Date(c.createdAt).getTime(), likes: c.likes?.length ?? 0, liked: c.likedByMe, replies: [] }; };
-const mapMessage = (m: ApiMessage, conversationId: string): Message => { const sender = typeof m.senderId === 'string' ? m.senderId : String(m.senderId._id ?? m.senderId.id); const reply = typeof m.replyTo === 'object' ? m.replyTo : undefined; return { id: m._id, conversationId, authorId: currentApiUser?.id === sender ? 'me' : sender, kind: m.kind ?? 'text', text: m.deleted ? 'This message was deleted' : m.text, createdAt: new Date(m.createdAt).getTime(), mine: currentApiUser?.id === sender, status: m.readBy?.some((id) => String(id) !== currentApiUser?.id) ? 'read' : m.deliveredTo?.some((id) => String(id) !== currentApiUser?.id) ? 'delivered' : 'sent', replyTo: reply ? { id: reply._id, authorId: reply.senderId ?? '', text: reply.text ?? '' } : undefined, reactions: Object.values((m.reactions ?? []).reduce<Record<string,{emoji:string;byMe?:boolean;count:number}>>((all,r)=>{all[r.emoji]??={emoji:r.emoji,count:0};all[r.emoji]!.count++;if(String(r.userId)===currentApiUser?.id)all[r.emoji]!.byMe=true;return all},{})), edited: Boolean(m.editedAt), deleted: m.deleted }; };
+const mapMessage = (m: ApiMessage, conversationId: string): Message => { const sender = typeof m.senderId === 'string' ? m.senderId : String(m.senderId._id ?? m.senderId.id); const reply = typeof m.replyTo === 'object' ? m.replyTo : undefined; const forwardedSender = typeof m.forwardedFrom?.senderId === 'object' ? m.forwardedFrom.senderId.name : m.forwardedFrom?.senderName; const firstAttachment = m.attachments?.[0]; const media = firstAttachment ? { id: firstAttachment.publicId, kind: firstAttachment.resourceType === 'video' ? 'video' as const : 'image' as const, src: firstAttachment.url, alt: firstAttachment.format } : undefined; return { id: m._id, conversationId, authorId: currentApiUser?.id === sender ? 'me' : sender, kind: m.kind ?? 'text', text: m.deleted ? 'This message was deleted' : m.text, media, fileName: firstAttachment?.format, fileSize: firstAttachment?.bytes ? `${Math.round(firstAttachment.bytes / 1024)} KB` : undefined, forwarded: Boolean(m.forwardedFrom), forwardedFrom: forwardedSender, createdAt: new Date(m.createdAt).getTime(), mine: currentApiUser?.id === sender, status: m.readBy?.some((id) => String(id) !== currentApiUser?.id) ? 'read' : m.deliveredTo?.some((id) => String(id) !== currentApiUser?.id) ? 'delivered' : 'sent', replyTo: reply ? { id: reply._id, authorId: typeof reply.senderId === 'string' ? reply.senderId : reply.senderId?._id ?? '', text: reply.text ?? '' } : undefined, reactions: Object.values((m.reactions ?? []).reduce<Record<string,{emoji:string;byMe?:boolean;count:number}>>((all,r)=>{all[r.emoji]??={emoji:r.emoji,count:0};all[r.emoji]!.count++;if(String(r.userId)===currentApiUser?.id)all[r.emoji]!.byMe=true;return all},{})), edited: Boolean(m.editedAt), deleted: m.deleted }; };
 
 export const backend = {
-  async currentUser() { const data = await request<{ user: ApiUser }>('/auth/me'); currentApiUser = mapUser(data.user); return { user: currentApiUser, followingIds: (data.user.following ?? []).map(String) }; },
+  async currentUser() { const [data, outgoing] = await Promise.all([request<{ user: ApiUser }>('/auth/me'), request<{ items: { targetId: string | ApiUser }[] }>('/follow-requests/outgoing')]); currentApiUser = mapUser(data.user); return { user: currentApiUser, followingIds: (data.user.following ?? []).map(String), requestedIds: outgoing.items.map((item) => typeof item.targetId === 'string' ? item.targetId : String(item.targetId._id ?? item.targetId.id)) }; },
   async getUser(id: string) { const { user } = await request<{ user: ApiUser }>(`/users/${id}`); return mapUser(user); },
+  async getProfileStats(id: string) { return request<{ stats: { posts: number; likes: number; reposts: number; followers: number; following: number; saved?: number } }>(`/users/${id}/stats`); },
+  async getProfilePosts(id: string, tab: 'posts' | 'replies' | 'media' | 'likes' | 'reposts' | 'saved', page = 1) { const { items, total } = await request<{ items: ApiPost[]; total: number }>(`/users/${id}/posts?tab=${tab}&page=${page}`); const mapped = items.map(mapPost); return { items: mapped.map((item) => item.post), authors: mapped.map((item) => item.author), total }; },
+  async searchUsers(query = '') { const { items } = await request<{ items: ApiUser[] }>(`/users/search?q=${encodeURIComponent(query)}`); return items.map(mapUser); },
+  async getBlockedUsers() { const { items } = await request<{ items: ApiUser[] }>('/users/blocked'); return items.map(mapUser); },
+  unblockUser(id: string) { return request(`/users/${id}/block`, { method: 'DELETE' }); },
+  saveAccountSettings(patch: { isPrivate?: boolean; privacy?: Record<string, boolean | string>; notificationPreferences?: Record<string, boolean> }) { return request<{ settings: { isPrivate: boolean; privacy: Record<string, boolean | string>; notificationPreferences: Record<string, boolean> } }>('/users/me/settings', { method: 'PATCH', body: JSON.stringify(patch) }); },
   async feed(tab: 'foryou' | 'following' | 'campus', cursor = 0) {
     const page = cursor + 1;
     const data = await request<{ items: ApiPost[]; total: number }>(`/posts?feed=${tab}&page=${page}`);
@@ -33,6 +41,22 @@ export const backend = {
     const mapped = data.posts.map(mapPost);
     return { people: data.people.map(mapUser), posts: mapped.map((entry) => entry.post), authors: mapped.map((entry) => entry.author), tags: data.tags.map((tag) => tag.name) };
   },
+  async getDiscovery() {
+    const [trends, people, announcements] = await Promise.all([
+      request<{ items: ApiTrend[] }>('/hashtags/trending'),
+      request<{ items: ApiUser[] }>('/users/search?q='),
+      request<{ items: ApiAnnouncement[] }>('/announcements'),
+    ]);
+    return {
+      trends: trends.items.map((tag) => ({ tag: tag.name, posts: tag.uses })),
+      people: people.items.map(mapUser),
+      announcements: announcements.items,
+    };
+  },
+  async getTrending() {
+    const { items } = await request<{ items: ApiTrend[] }>('/hashtags/trending');
+    return items.map((tag) => tag.name);
+  },
   async publishPost(input: { text: string; media?: Post['media']; anonymous?: boolean }) {
     const data = await request<{ post: ApiPost }>('/posts', { method: 'POST', body: JSON.stringify(input) });
     return mapPost(data.post);
@@ -41,16 +65,30 @@ export const backend = {
   toggleRepost(id: string) { return request<{ reposted: boolean; reposts: number }>(`/posts/${id}/repost`, { method: 'POST' }); },
   hidePost(id: string) { return request<{ ok: boolean }>(`/posts/${id}/hide`, { method: 'POST' }); },
   toggleBookmark(id: string) { return request<{ bookmarked: boolean }>(`/posts/${id}/bookmark`, { method: 'POST' }); },
-  toggleFollow(id: string) { return request<{ following: boolean }>(`/users/${id}/follow`, { method: 'POST' }); },
-  report(targetType: 'user' | 'post' | 'comment' | 'message', targetId: string, reason: string) { return request('/reports', { method: 'POST', body: JSON.stringify({ targetType, targetId, reason }) }); },
-  updateProfile(input: Partial<Pick<User, 'name' | 'bio' | 'course'>>) { return request<{ user: ApiUser }>('/users/me', { method: 'PATCH', body: JSON.stringify(input) }).then(({ user }) => mapUser(user)); },
-  async getNotifications() { const { items } = await request<{ items: ApiNotification[] }>('/notifications'); return items.map((n): AppNotification => { const actor = typeof n.actorId === 'object' ? mapUser(n.actorId) : undefined; return { id: n._id, kind: (['like','comment','reply','follow','mention','repost','message','campus','account'].includes(n.kind) ? n.kind : 'account') as AppNotification['kind'], actorId: actor?.id, title: n.title ?? 'CampusLaugh update', body: n.body ?? '', createdAt: new Date(n.createdAt).getTime(), read: Boolean(n.readAt), postId: ['like','comment','repost'].includes(n.kind) ? n.targetId : undefined, to: n.kind === 'follow' && actor ? `/profile/${actor.id}` : undefined }; }); },
-  async getConversations() { const { items } = await request<{ items: ApiConversation[] }>('/conversations'); return Promise.all(items.map(async (c): Promise<Conversation> => { const id = c._id; const participantIds = c.members.map((m) => { if (typeof m === 'string') return m; const user = mapUser(m); conversationUserCache.set(user.id, user); return user.id; }).filter((memberId) => memberId !== currentApiUser?.id); const { items: messages } = await request<{ items: ApiMessage[] }>(`/conversations/${id}/messages`); return { id, participantIds, group: c.group, title: c.title, messages: messages.map((m) => mapMessage(m, id)), unread: 0, pinned: Boolean(c.pinnedBy?.some((userId) => userId === currentApiUser?.id)), muted: Boolean(c.mutedBy?.some((userId) => userId === currentApiUser?.id)), archived: Boolean(c.archivedBy?.some((userId) => userId === currentApiUser?.id)), wallpaper: 'midnight' }; })); },
+  toggleFollow(id: string) { return request<{ following: boolean; requested?: boolean }>(`/users/${id}/follow`, { method: 'POST' }); },
+  report(targetType: 'user' | 'post' | 'comment' | 'message', targetId: string, reason: string, details?: string) { return request('/reports', { method: 'POST', body: JSON.stringify({ targetType, targetId, reason, ...(details ? { details } : {}) }) }); },
+  updateProfile(input: Partial<Pick<User, 'name' | 'username' | 'bio' | 'course' | 'department' | 'location' | 'website' | 'avatar' | 'cover'>>) { return request<{ user: ApiUser }>('/users/me', { method: 'PATCH', body: JSON.stringify(input) }).then(({ user }) => mapUser(user)); },
+  mapNotification(raw: unknown): AppNotification {
+    const n = raw as ApiNotification;
+    const actor = typeof n.actorId === 'object' ? mapUser(n.actorId) : undefined;
+    if (actor) conversationUserCache.set(actor.id, actor);
+    const actorId = actor?.id ?? (typeof n.actorId === 'string' ? n.actorId : undefined);
+    const conversationId = n.conversationId ?? (n.kind === 'message' ? n.targetId : undefined);
+    return { id: n._id, kind: (['like','comment','reply','follow','mention','repost','message','campus','account'].includes(n.kind) ? n.kind : 'account') as AppNotification['kind'], actorId, title: n.title ?? '', body: n.body ?? '', createdAt: new Date(n.createdAt).getTime(), read: Boolean(n.readAt), postId: ['like','comment','reply','repost','mention'].includes(n.kind) ? n.targetId : undefined, conversationId, to: n.kind === 'follow' && actorId ? `/profile/${actorId}` : n.kind === 'message' && conversationId ? `/chats/${conversationId}` : ['like','comment','reply','repost','mention'].includes(n.kind) && n.targetId ? '/home' : undefined };
+  },
+  async getNotifications() { const { items } = await request<{ items: ApiNotification[] }>('/notifications'); return items.map((n) => this.mapNotification(n)); },
+  async getConversations() { const { items } = await request<{ items: ApiConversation[] }>('/conversations'); return items.map((c): Conversation => { const participantIds = c.members.map((m) => { if (typeof m === 'string') return m; const user = mapUser(m); conversationUserCache.set(user.id, user); return user.id; }).filter((memberId) => memberId !== currentApiUser?.id); return { id: c._id, participantIds, group: c.group, title: c.title, image: c.image, ownerId: c.ownerId, admins: c.admins, messages: [], unread: c.unread ?? 0, pinned: Boolean(c.pinnedBy?.some((userId) => userId === currentApiUser?.id)), muted: Boolean(c.mutedBy?.some((userId) => userId === currentApiUser?.id)), archived: Boolean(c.archivedBy?.some((userId) => userId === currentApiUser?.id)), wallpaper: 'midnight' }; }); },
   getConversationUsers() { return [...conversationUserCache.values()]; },
   async getMessages(id: string) { const { items } = await request<{ items: ApiMessage[] }>(`/conversations/${id}/messages`); return items.map((message) => mapMessage(message, id)); },
   mapMessage(message: unknown, conversationId: string) { return mapMessage(message as ApiMessage, conversationId); },
   createConversation(userId: string) { return request<{ conversation: ApiConversation }>('/conversations', { method: 'POST', body: JSON.stringify({ memberIds: [userId] }) }); },
   async sendMessage(id: string, text: string, replyTo?: string) { const { message } = await request<{ message: ApiMessage }>(`/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ text, replyTo }) }); return mapMessage(message, id); },
+  async sendAttachments(id: string, attachmentIds: string[], text?: string) { const { message } = await request<{ message: ApiMessage }>(`/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ attachmentIds, text }) }); return mapMessage(message, id); },
+  readConversation(id: string) { return request<{ ok: boolean }>(`/conversations/${id}/read`, { method: 'PATCH' }); },
+  forwardMessage(messageId: string, conversationIds: string[], text?: string) { return request<{ messages: ApiMessage[] }>('/messages/' + messageId + '/forward', { method: 'POST', body: JSON.stringify({ conversationIds, text }) }); },
+  createGroup(memberIds: string[], title: string) { return request<{ conversation: ApiConversation }>('/conversations', { method: 'POST', body: JSON.stringify({ memberIds, group: true, title }) }); },
+  addGroupMembers(id: string, userIds: string[]) { return request(`/conversations/${id}/members`, { method: 'POST', body: JSON.stringify({ userIds }) }); },
+  removeGroupMember(id: string, userId: string) { return request(`/conversations/${id}/members/${userId}`, { method: 'DELETE' }); },
   async getComments(postId: string) {
     const { items } = await request<{ items: ApiComment[] }>(`/posts/${postId}/comments`);
     const mapped = items.map(mapComment);

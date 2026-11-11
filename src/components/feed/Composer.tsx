@@ -7,28 +7,23 @@ import {
   Hash,
   Image as ImageIcon,
   Loader2,
-  MapPin,
   Sparkles,
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@/context/StoreContext";
 import { useSystem } from "@/context/SystemContext";
-import { trending, userArray } from "@/data/mock";
 import type { MediaItem } from "@/types";
-import { cn, extractTags, uid } from "@/utils/format";
+import { cn, extractTags } from "@/utils/format";
+import { backend } from "@/services/backend";
+import { getAccessToken } from "@/services/http";
+import { uploadMedia } from "@/services/upload";
 import { Avatar, Button } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/overlays";
 import { springSnappy } from "@/components/ui/primitives";
 
 const LIMIT = 500;
-
-const sampleMedia: { id: string; src: string; alt: string }[] = [
-  { id: "s1", src: "https://images.pexels.com/photos/7972544/pexels-photo-7972544.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=500&w=700", alt: "Students grouping on campus" },
-  { id: "s2", src: "https://images.pexels.com/photos/30714883/pexels-photo-30714883.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=500&w=700", alt: "Friends laughing outdoors" },
-  { id: "s3", src: "https://images.pexels.com/photos/6140610/pexels-photo-6140610.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=500&w=700", alt: "Students in a corridor" },
-];
 
 export function Composer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { createPost, me } = useStore();
@@ -39,7 +34,9 @@ export function Composer({ open, onClose }: { open: boolean; onClose: () => void
   const [publishing, setPublishing] = useState(false);
   const [done, setDone] = useState(false);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  const [showSamples, setShowSamples] = useState(false);
+  const [mentionSuggestions, setMentionSuggestions] = useState<{ id: string; name: string; username: string; avatar?: string }[]>([]);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -53,7 +50,6 @@ export function Composer({ open, onClose }: { open: boolean; onClose: () => void
       setAnonymous(false);
       setDone(false);
       setPublishing(false);
-      setShowSamples(false);
       window.setTimeout(() => areaRef.current?.focus(), 260);
     }
   }, [open]);
@@ -63,30 +59,47 @@ export function Composer({ open, onClose }: { open: boolean; onClose: () => void
     setMentionQuery(match ? match[2]! : null);
   }, [text]);
 
-  const mentions = useMemo(() => {
-    if (mentionQuery === null) return [];
-    const q = mentionQuery.toLowerCase();
-    return userArray.filter((u) => u.username.includes(q) || u.name.toLowerCase().includes(q)).slice(0, 5);
+  useEffect(() => {
+    if (mentionQuery === null || !getAccessToken()) { setMentionSuggestions([]); return; }
+    let live = true;
+    const timer = window.setTimeout(() => {
+      void backend.search(mentionQuery).then((result) => { if (live) setMentionSuggestions(result.people.slice(0, 5)); }).catch(() => { if (live) setMentionSuggestions([]); });
+    }, 180);
+    return () => { live = false; window.clearTimeout(timer); };
   }, [mentionQuery]);
 
-  const suggestions = useMemo(() => trending.slice(0, 5).map((t) => t.tag), []);
+  useEffect(() => {
+    if (!open || !getAccessToken()) return;
+    let live = true;
+    void backend.getTrending().then((tags) => { if (live) setSuggestions(tags.slice(0, 5)); }).catch(() => { if (live) setSuggestions([]); });
+    return () => { live = false; };
+  }, [open]);
 
-  const onFiles = (files: FileList | null) => {
+  const onFiles = async (files: FileList | null) => {
     if (!files?.length) return;
-    const next: MediaItem[] = Array.from(files)
-      .slice(0, 4 - media.length)
-      .map((f) => ({
-        id: uid("m"),
-        kind: f.type.startsWith("video") ? "video" : "image",
-        src: URL.createObjectURL(f),
-        alt: f.name,
-      }));
-    if (!next.length) {
+    const selected = Array.from(files).slice(0, 4 - media.length);
+    if (!selected.length) {
       toast({ title: "Up to 4 media items per post", tone: "warning" });
       return;
     }
-    setMedia((m) => [...m, ...next]);
-    haptic(6);
+    if (selected.some((file) => !/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime))$/.test(file.type))) {
+      toast({ title: "Unsupported media type", description: "Choose JPG, PNG, WEBP, GIF, MP4, WEBM, or MOV files.", tone: "error" });
+      return;
+    }
+    if (selected.some((file) => file.size > 50 * 1024 * 1024)) {
+      toast({ title: "Media file is too large", description: "Each file must be 50 MB or smaller.", tone: "error" });
+      return;
+    }
+    if (!getAccessToken()) { toast({ title: "Sign in to upload media", tone: "warning" }); return; }
+    setUploadProgress(0);
+    try {
+      const uploaded = await Promise.all(selected.map((file) => uploadMedia(file, setUploadProgress)));
+      const next: MediaItem[] = uploaded.map((result, index) => ({ id: result.publicId, kind: selected[index]!.type.startsWith("video/") ? "video" : "image", src: result.url, alt: selected[index]!.name }));
+      setMedia((current) => [...current, ...next]);
+      haptic(6);
+    } catch (error) {
+      toast({ title: "Media upload failed", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+    } finally { setUploadProgress(null); }
   };
 
   const publish = async () => {
@@ -168,12 +181,6 @@ export function Composer({ open, onClose }: { open: boolean; onClose: () => void
             <ComposerIcon label="Add video" onClick={() => fileRef.current?.click()}>
               <Film className="h-[18px] w-[18px]" />
             </ComposerIcon>
-            <ComposerIcon label="Add demo media" active={showSamples} onClick={() => setShowSamples((s) => !s)}>
-              <Sparkles className="h-[18px] w-[18px]" />
-            </ComposerIcon>
-            <ComposerIcon label="Tag campus (demo)" onClick={() => toast({ title: "Campus tagged", description: me.campus, tone: "info" })}>
-              <MapPin className="h-[18px] w-[18px]" />
-            </ComposerIcon>
           </div>
 
           <div className="ml-auto flex items-center gap-3">
@@ -245,14 +252,14 @@ export function Composer({ open, onClose }: { open: boolean; onClose: () => void
           />
 
           <AnimatePresence>
-            {mentions.length > 0 && (
+              {mentionSuggestions.length > 0 && (
               <motion.div
                 initial={{ opacity: 0, y: -6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
                 className="glass-solid absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-2xl p-1"
               >
-                {mentions.map((u) => (
+                {mentionSuggestions.map((u) => (
                   <button
                     key={u.id}
                     onClick={() => {
@@ -298,13 +305,14 @@ export function Composer({ open, onClose }: { open: boolean; onClose: () => void
         </div>
 
         <AnimatePresence>
-          {(media.length > 0 || showSamples) && (
+          {(media.length > 0 || uploadProgress !== null) && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
               className="mt-3 overflow-hidden"
             >
+              {uploadProgress !== null && <div role="status" className="mb-2 rounded-xl border border-line bg-glass px-3 py-2 text-xs font-semibold text-ink2">Uploading media… {uploadProgress}%</div>}
               {media.length > 0 && (
                 <div className="grid grid-cols-3 gap-2">
                   <AnimatePresence>
@@ -339,30 +347,6 @@ export function Composer({ open, onClose }: { open: boolean; onClose: () => void
                 </div>
               )}
 
-              {showSamples && (
-                <div className="mt-3">
-                  <p className="mb-1.5 text-[11.5px] font-bold uppercase tracking-wide text-ink3">
-                    Demo media (frontend sample assets)
-                  </p>
-                  <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-                    {sampleMedia.map((sm) => (
-                      <button
-                        key={sm.id}
-                        onClick={() =>
-                          setMedia((m) =>
-                            m.length >= 4
-                              ? m
-                              : [...m, { id: uid("m"), kind: "image", src: sm.src, alt: sm.alt }],
-                          )
-                        }
-                        className="press relative h-16 w-24 shrink-0 overflow-hidden rounded-xl border border-line"
-                      >
-                        <img src={sm.src} alt={sm.alt} loading="lazy" className="h-full w-full object-cover" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </motion.div>
           )}
         </AnimatePresence>

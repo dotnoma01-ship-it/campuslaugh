@@ -1,14 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { Socket } from "socket.io-client";
 import { useSystem } from "@/context/SystemContext";
-import {
-  conversations as seedConversations,
-  demoIncoming,
-  ME,
-  notifications as seedNotifications,
-  posts as seedPosts,
-  users as userDb,
-} from "@/data/mock";
+import { ME } from "@/data/constants";
 import { usePersistentState } from "@/hooks";
 import type { AppNotification, Comment, Conversation, Message, Post, User, WallpaperId } from "@/types";
 import { uid } from "@/utils/format";
@@ -23,6 +16,7 @@ interface NewMessageInput {
   duration?: number;
   fileName?: string;
   fileSize?: string;
+  attachmentIds?: string[];
   replyTo?: Message["replyTo"];
 }
 
@@ -36,15 +30,17 @@ interface StoreCtx {
   apiUserId: string | null;
   conversations: Conversation[];
   notifications: AppNotification[];
+  notificationsLoading: boolean;
+  notificationsError: boolean;
+  reloadNotifications: () => void;
   me: User;
   users: Record<string, User>;
   following: string[];
+  requestedFollowing: string[];
   bookmarks: Post[];
   recentSearches: string[];
-  ambient: boolean;
   unreadTotal: number;
   unreadNotifications: number;
-  setAmbient: (v: boolean) => void;
 
   userById: (id: string) => User;
   postById: (id: string) => Post | undefined;
@@ -63,9 +59,10 @@ interface StoreCtx {
   deletePost: (postId: string) => void;
 
   /* profile */
-  updateProfile: (patch: Partial<User>) => void;
+  updateProfile: (patch: Partial<User>) => Promise<void>;
   toggleFollow: (userId: string) => boolean;
   isFollowing: (userId: string) => boolean;
+  isFollowRequested: (userId: string) => boolean;
 
   /* chat */
   sendMessage: (conversationId: string, input: NewMessageInput) => void;
@@ -86,12 +83,10 @@ interface StoreCtx {
   markAllNotificationsRead: () => void;
   clearNotifications: () => void;
   removeNotification: (id: string) => void;
-  pushNotification: (n: Omit<AppNotification, "id" | "createdAt" | "read"> & { createdAt?: number }) => AppNotification;
 
   /* misc */
   addRecentSearch: (term: string) => void;
   clearRecentSearches: () => void;
-  resetDemoData: () => void;
 }
 
 const Ctx = createContext<StoreCtx | null>(null);
@@ -102,17 +97,24 @@ const sortDesc = <T,>(arr: T[], key: (item: T) => number) => [...arr].sort((a, b
 function StoreProviderInner({ children }: { children: React.ReactNode }) {
   const system = useSystem();
   const [ready, setReady] = useState(false);
-  const [posts, setPosts] = usePersistentState<Post[]>("campuslaugh:posts:v2", seedPosts);
+  const [posts, setPosts] = useState<Post[]>([]);
   const [remotePosts, setRemotePosts] = useState<Post[] | null>(null);
   const [remoteUsers, setRemoteUsers] = useState<Record<string, User>>({});
   const [apiUserId, setApiUserId] = useState<string | null>(null);
   const [chatSocket, setChatSocket] = useState<Socket | null>(null);
-  const [conversations, setConversations] = usePersistentState<Conversation[]>("campuslaugh:chats:v2", seedConversations);
-  const [notifications, setNotifications] = usePersistentState<AppNotification[]>("campuslaugh:notifs:v2", seedNotifications);
-  const [me, setMe] = usePersistentState<User>("campuslaugh:me:v2", userDb[ME]);
-  const [following, setFollowing] = usePersistentState<string[]>("campuslaugh:following:v2", ["u1", "u2", "u4", "u5", "u6"]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState(false);
+  const [me, setMe] = useState<User>({ id: ME, name: "", username: "", institution: "", campus: "", avatar: "", followers: 0, following: 0 });
+  const [following, setFollowing] = useState<string[]>([]);
+  const [requestedFollowing, setRequestedFollowing] = useState<string[]>([]);
   const [recentSearches, setRecentSearches] = usePersistentState<string[]>("campuslaugh:searches:v2", []);
-  const [ambient, setAmbient] = useState(true);
+  useEffect(() => {
+    try {
+      ["campuslaugh:notifs:v2", "campuslaugh:posts:v2", "campuslaugh:chats:v2", "campuslaugh:me:v2", "campuslaugh:following:v2"].forEach((key) => localStorage.removeItem(key));
+    } catch { /* Storage may be unavailable. */ }
+  }, []);
 
   useEffect(() => {
     const t = window.setTimeout(() => setReady(true), 620);
@@ -122,16 +124,28 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let live = true;
     const restore = async () => {
-      if (!getAccessToken()) return;
+      if (!getAccessToken()) {
+        setApiUserId(null);
+        setNotifications([]);
+        setConversations([]);
+        setMe({ id: ME, name: "", username: "", institution: "", campus: "", avatar: "", followers: 0, following: 0 });
+        setFollowing([]);
+        setRequestedFollowing([]);
+        setRecentSearches([]);
+        setRemotePosts(null);
+        setRemoteUsers({});
+        return;
+      }
       try {
-        const { user, followingIds } = await backend.currentUser();
+        const { user, followingIds, requestedIds } = await backend.currentUser();
         if (!live || !user) return;
         setApiUserId(user.id);
         setFollowing(followingIds);
+        setRequestedFollowing(requestedIds);
         setRemoteUsers((previous) => ({ ...previous, [user.id]: user }));
         setMe((previous) => ({
           ...previous,
-          id: ME,
+          id: user.id,
           name: user.name,
           username: user.username,
           institution: user.institution ?? "",
@@ -155,14 +169,22 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setMe, system.toast]);
 
+  const reloadNotifications = useCallback(() => {
+    if (!apiUserId) { setNotifications([]); setNotificationsLoading(false); return; }
+    setNotificationsLoading(true);
+    setNotificationsError(false);
+    void backend.getNotifications().then((items) => {
+      setNotifications(items);
+      setRemoteUsers((previous) => ({ ...previous, ...Object.fromEntries(backend.getConversationUsers().map((user) => [user.id, user])) }));
+    }).catch(() => {
+      setNotificationsError(true);
+      system.toast({ title: "Could not load notifications", description: "Try again when the connection is available.", tone: "error" });
+    }).finally(() => setNotificationsLoading(false));
+  }, [apiUserId, system.toast]);
+
   useEffect(() => {
-    if (!apiUserId) return;
-    let live = true;
-    void backend.getNotifications().then((items) => { if (live) setNotifications(items); }).catch(() => {
-      if (live) system.toast({ title: "Could not load notifications", description: "Try again when the connection is available.", tone: "error" });
-    });
-    return () => { live = false; };
-  }, [apiUserId, setNotifications, system.toast]);
+    reloadNotifications();
+  }, [reloadNotifications]);
 
   useEffect(() => {
     if (!apiUserId) return;
@@ -182,6 +204,12 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         messages: conversation.messages.some((entry) => entry.id === message.id) ? conversation.messages : [...conversation.messages, message],
         unread: message.mine ? conversation.unread : conversation.unread + 1,
       }));
+    });
+    socket.on("notification:new", (raw: unknown) => {
+      if (!live) return;
+      const notification = backend.mapNotification(raw);
+      if (!isObjectId(notification.id)) return;
+      setNotifications((previous) => [notification, ...previous.filter((item) => item.id !== notification.id)]);
     });
     socket.on("typing", (payload: { conversationId?: string; active?: boolean }) => {
       if (!payload.conversationId || typeof payload.active !== "boolean") return;
@@ -213,7 +241,7 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
     });
   }, [chatSocket, conversations]);
 
-  const userById = useCallback((id: string) => id === ME || id === me.id ? me : remoteUsers[id] ?? userDb[id] ?? me, [me, remoteUsers]);
+  const userById = useCallback((id: string) => id === ME || id === me.id ? me : remoteUsers[id] ?? me, [me, remoteUsers]);
   const setRemoteFeed = useCallback((items: Post[], users: User[]) => {
     setRemotePosts(items);
     setRemoteUsers((previous) => ({ ...previous, ...Object.fromEntries(users.map((user) => [user.id, user])) }));
@@ -242,14 +270,14 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         if (liked) system.haptic(6);
         return { ...p, liked, likes: p.likes + (liked ? 1 : -1) };
       });
-      if (isObjectId(postId) && remotePosts?.some((p) => p.id === postId)) {
+      if (apiUserId && isObjectId(postId)) {
         void backend.toggleLike(postId).catch((error) => {
           patchPost(postId, (p) => ({ ...p, liked: original, likes: Math.max(0, p.likes + (original ? 1 : -1)) }));
           system.toast({ title: "Like wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
         });
       }
     },
-    [patchPost, remotePosts, system],
+    [apiUserId, patchPost, remotePosts, system],
   );
 
   const toggleBookmark = useCallback(
@@ -260,56 +288,59 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         saved = !p.bookmarked;
         return { ...p, bookmarked: saved };
       });
-      system.toast({
-        title: saved ? "Saved to bookmarks" : "Removed from bookmarks",
-        description: saved ? "Find it anytime in Profile → Bookmarks" : undefined,
-        tone: saved ? "success" : "info",
-      });
-      if (isObjectId(postId) && remotePosts?.some((p) => p.id === postId)) {
-        void backend.toggleBookmark(postId).catch((error) => {
+      if (apiUserId && isObjectId(postId)) {
+        void backend.toggleBookmark(postId).then(() => system.toast({
+          title: saved ? "Saved to bookmarks" : "Removed from bookmarks",
+          description: saved ? "Find it anytime in Profile → Bookmarks" : undefined,
+          tone: saved ? "success" : "info",
+        })).catch((error) => {
           patchPost(postId, (p) => ({ ...p, bookmarked: original }));
           system.toast({ title: "Bookmark wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
         });
-      }
+      } else system.toast({ title: "Bookmark unavailable", description: "Sign in to save posts.", tone: "warning" });
     },
-    [patchPost, remotePosts, system],
+    [apiUserId, patchPost, remotePosts, system],
   );
 
   const toggleRepost = useCallback(
     (postId: string) => {
       const previous = remotePosts?.find((post) => post.id === postId)?.reposted ?? false;
+      const next = !previous;
       patchPost(postId, (p) => {
         const reposted = !p.reposted;
-        if (reposted) system.toast({ title: "Reposted to your campus", tone: "success" });
         return { ...p, reposted, reposts: p.reposts + (reposted ? 1 : -1) };
       });
-      if (isObjectId(postId) && remotePosts?.some((p) => p.id === postId)) void backend.toggleRepost(postId).catch((error) => {
+      if (apiUserId && isObjectId(postId)) void backend.toggleRepost(postId).then(() => {
+        system.toast({ title: next ? "Reposted to your campus" : "Repost removed", tone: next ? "success" : "info" });
+      }).catch((error) => {
         patchPost(postId, (p) => ({ ...p, reposted: previous, reposts: Math.max(0, p.reposts + (previous ? 1 : -1)) }));
         system.toast({ title: "Repost wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
       });
     },
-    [patchPost, remotePosts, system],
+    [apiUserId, patchPost, remotePosts, system],
   );
 
   const hidePost = useCallback(
     (postId: string) => {
-      setPosts((prev) => prev.filter((p) => p.id !== postId));
-      setRemotePosts((prev) => prev?.filter((p) => p.id !== postId) ?? null);
-      if (isObjectId(postId)) void backend.hidePost(postId).catch((error) => system.toast({ title: "Post wasn’t hidden", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
-      system.toast({ title: "Post hidden", description: "You'll see fewer posts like this", tone: "info" });
+      if (!apiUserId || !isObjectId(postId)) return system.toast({ title: "Hide unavailable", description: "Sign in to hide posts.", tone: "warning" });
+      void backend.hidePost(postId).then(() => {
+        setPosts((prev) => prev.filter((p) => p.id !== postId));
+        setRemotePosts((prev) => prev?.filter((p) => p.id !== postId) ?? null);
+        system.toast({ title: "Post hidden", description: "You'll see fewer posts like this", tone: "info" });
+      }).catch((error) => system.toast({ title: "Post wasn’t hidden", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
     },
-    [setPosts, system],
+    [apiUserId, setPosts, system],
   );
 
   const reportPost = useCallback(
     (postId: string, reason: string) => {
-      if (isObjectId(postId) && remotePosts?.some((p) => p.id === postId)) {
-        void backend.report('post', postId, reason).then(() => system.toast({ title: "Report submitted", description: "Thanks for helping keep CampusLaugh safe.", tone: "success" })).catch((error) => system.toast({ title: "Report wasn’t sent", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
+      if (!apiUserId || !isObjectId(postId)) {
+        system.toast({ title: "Report unavailable", description: "Sign in to report posts.", tone: "warning" });
         return;
       }
-      system.toast({ title: "Report submitted", description: reason, tone: "warning" });
+      void backend.report('post', postId, reason).then(() => system.toast({ title: "Report submitted", description: "Thanks for helping keep CampusLaugh safe.", tone: "success" })).catch((error) => system.toast({ title: "Report wasn’t sent", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
     },
-    [remotePosts, system],
+    [apiUserId, system],
   );
 
   const votePoll = useCallback(
@@ -326,6 +357,10 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
 
   const addComment = useCallback(
     (postId: string, text: string, parentId?: string) => {
+      if (!apiUserId || !isObjectId(postId)) {
+        system.toast({ title: "Comment unavailable", description: "Sign in to comment.", tone: "warning" });
+        return;
+      }
       const comment: Comment = {
         id: uid("c"),
         authorId: ME,
@@ -341,17 +376,16 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
           comments: p.comments.map((c) => (c.id === parentId ? { ...c, replies: [...(c.replies ?? []), comment] } : c)),
         };
       });
-      if (isObjectId(postId) && remotePosts?.some((p) => p.id === postId)) {
-        void backend.addComment(postId, text, parentId).then((saved) => {
-          const replace = (comments: Comment[]): Comment[] => comments.map((item) => item.id === comment.id ? saved : { ...item, replies: item.replies ? replace(item.replies) : item.replies });
-          patchPost(postId, (p) => ({ ...p, comments: replace(p.comments) }));
-        }).catch((error) => {
-          system.toast({ title: "Comment wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
-        });
-      }
+      void backend.addComment(postId, text, parentId).then((saved) => {
+        const replace = (comments: Comment[]): Comment[] => comments.map((item) => item.id === comment.id ? saved : { ...item, replies: item.replies ? replace(item.replies) : item.replies });
+        patchPost(postId, (p) => ({ ...p, comments: replace(p.comments) }));
+      }).catch((error) => {
+        patchPost(postId, (p) => ({ ...p, comments: p.comments.filter((entry) => entry.id !== comment.id).map((entry) => ({ ...entry, replies: entry.replies?.filter((reply) => reply.id !== comment.id) })) }));
+        system.toast({ title: "Comment wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+      });
       system.haptic(4);
     },
-    [patchPost, remotePosts, system],
+    [apiUserId, patchPost, system],
   );
 
   const toggleCommentLike = useCallback(
@@ -363,83 +397,88 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
             : { ...c, replies: c.replies ? walk(c.replies) : c.replies },
         );
       patchPost(postId, (p) => ({ ...p, comments: walk(p.comments) }));
-      if (isObjectId(commentId) && remotePosts?.some((p) => p.id === postId)) {
+      if (apiUserId && isObjectId(commentId)) {
         void backend.toggleCommentLike(commentId).catch((error) => system.toast({ title: "Comment like wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
       }
     },
-    [patchPost, remotePosts, system],
+    [apiUserId, patchPost, system],
   );
 
   const createPost = useCallback<StoreCtx["createPost"]>(
     async (input) => {
-      if (getAccessToken()) {
-        const { post, author } = await backend.publishPost(input);
-        setRemoteUsers((previous) => ({ ...previous, [author.id]: author }));
-        setRemotePosts((previous) => [post, ...(previous ?? [])]);
-        return post;
-      }
-      const hashtags = Array.from(new Set((input.text.match(/#[\w]+/g) ?? []).map((t) => t.slice(1))));
-      const post: Post = {
-        id: uid("p"),
-        authorId: input.anonymous ? "anon" : ME,
-        anonymous: input.anonymous,
-        text: input.text,
-        media: input.media,
-        hashtags,
-        createdAt: Date.now(),
-        likes: 0,
-        reposts: 0,
-        views: 1,
-        comments: [],
-        campus: me.campus,
-      };
-      setPosts((prev) => [post, ...prev]);
+      if (!getAccessToken()) throw new Error("Sign in to publish a post.");
+      const { post, author } = await backend.publishPost(input);
+      setRemoteUsers((previous) => ({ ...previous, [author.id]: author }));
+      setRemotePosts((previous) => [post, ...(previous ?? [])]);
       return post;
     },
-    [me.campus, setPosts],
+    [],
   );
 
   const deletePost = useCallback(
     (postId: string) => {
-      setPosts((prev) => prev.filter((p) => p.id !== postId));
-      if (isObjectId(postId) && remotePosts?.some((p) => p.id === postId)) {
-        void request(`/posts/${postId}`, { method: "DELETE" }).catch((error) => system.toast({ title: "Post wasn’t deleted", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
+      if (!apiUserId || !isObjectId(postId)) return system.toast({ title: "Delete unavailable", description: "Sign in to delete posts.", tone: "warning" });
+      void request(`/posts/${postId}`, { method: "DELETE" }).then(() => {
+        setPosts((prev) => prev.filter((p) => p.id !== postId));
         setRemotePosts((prev) => prev?.filter((p) => p.id !== postId) ?? null);
-        return;
-      }
-      system.toast({ title: "Post deleted", tone: "warning" });
+        system.toast({ title: "Post deleted", tone: "success" });
+      }).catch((error) => system.toast({ title: "Post wasn’t deleted", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
     },
-    [setPosts, remotePosts, system],
+    [apiUserId, setPosts, system],
   );
 
   /* ----------------------------- profile ---------------------------- */
 
-  const updateProfile = useCallback((patch: Partial<User>) => {
-    setMe((prev) => ({ ...prev, ...patch }));
-    if (getAccessToken()) {
-      const safe = { ...(patch.name !== undefined ? { name: patch.name } : {}), ...(patch.bio !== undefined ? { bio: patch.bio } : {}), ...(patch.course !== undefined ? { course: patch.course } : {}) };
-      void backend.updateProfile(safe).then((user) => setMe((previous) => ({ ...previous, name: user.name, bio: user.bio, course: user.course }))).catch((error) => system.toast({ title: "Profile change wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
-    }
-  }, [setMe, system]);
+  const updateProfile = useCallback(async (patch: Partial<User>) => {
+    if (!apiUserId) throw new Error("Sign in to update your profile.");
+    const safe = {
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
+      ...(patch.bio !== undefined ? { bio: patch.bio } : {}),
+      ...(patch.course !== undefined ? { course: patch.course } : {}),
+      ...(patch.username !== undefined ? { username: patch.username } : {}),
+      ...(patch.department !== undefined ? { department: patch.department } : {}),
+      ...(patch.location !== undefined ? { location: patch.location } : {}),
+      ...(patch.website !== undefined ? { website: patch.website } : {}),
+      ...(patch.avatar !== undefined ? { avatar: patch.avatar } : {}),
+      ...(patch.cover !== undefined ? { cover: patch.cover } : {}),
+    };
+    const user = await backend.updateProfile(safe);
+    setMe((previous) => ({ ...previous, ...user }));
+  }, [apiUserId, setMe]);
 
   const isFollowing = useCallback((userId: string) => following.includes(userId), [following]);
+  const isFollowRequested = useCallback((userId: string) => requestedFollowing.includes(userId), [requestedFollowing]);
 
   const toggleFollow = useCallback(
     (userId: string) => {
-      const nowFollowing = !following.includes(userId);
-      setFollowing((prev) => (nowFollowing ? [...prev, userId] : prev.filter((x) => x !== userId)));
-      setMe((prev) => ({ ...prev, following: prev.following + (nowFollowing ? 1 : -1) }));
-      if (isObjectId(userId) && remoteUsers[userId] && getAccessToken()) {
-        void backend.toggleFollow(userId).catch((error) => {
-          setFollowing((prev) => (nowFollowing ? prev.filter((x) => x !== userId) : [...prev, userId]));
-          setMe((prev) => ({ ...prev, following: Math.max(0, prev.following + (nowFollowing ? -1 : 1)) }));
-          system.toast({ title: "Follow change wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
-        });
+      if (!apiUserId || !isObjectId(userId)) {
+        system.toast({ title: "Follow unavailable", description: "Follow users loaded from the authenticated service.", tone: "warning" });
+        return following.includes(userId);
       }
+      const wasFollowing = following.includes(userId);
+      const wasRequested = requestedFollowing.includes(userId);
+      const optimisticFollowing = !wasFollowing && !wasRequested;
+      const nowFollowing = !wasFollowing;
+      if (wasFollowing) { setFollowing((prev) => prev.filter((x) => x !== userId)); setMe((prev) => ({ ...prev, following: Math.max(0, prev.following - 1) })); }
+      else if (wasRequested) setRequestedFollowing((prev) => prev.filter((x) => x !== userId));
+      else { setFollowing((prev) => [...new Set([...prev, userId])]); setMe((prev) => ({ ...prev, following: prev.following + 1 })); }
+      void backend.toggleFollow(userId).then((result) => {
+        setFollowing((prev) => result.following ? [...new Set([...prev, userId])] : prev.filter((x) => x !== userId));
+        setRequestedFollowing((prev) => result.requested ? [...new Set([...prev, userId])] : prev.filter((x) => x !== userId));
+        setMe((prev) => ({ ...prev, following: Math.max(0, prev.following + (result.following ? 1 : 0) - (optimisticFollowing ? 1 : 0)) }));
+        if (result.requested) system.toast({ title: "Follow request sent", tone: "success" });
+        else if (wasRequested) system.toast({ title: "Follow request cancelled", tone: "info" });
+        else system.toast({ title: result.following ? "Followed account" : "Unfollowed account", tone: result.following ? "success" : "info" });
+      }).catch((error) => {
+        setFollowing((prev) => wasFollowing ? [...new Set([...prev, userId])] : prev.filter((x) => x !== userId));
+        setRequestedFollowing((prev) => wasRequested ? [...new Set([...prev, userId])] : prev.filter((x) => x !== userId));
+        setMe((prev) => ({ ...prev, following: Math.max(0, prev.following + (wasFollowing ? 1 : 0) - (optimisticFollowing ? 1 : 0)) }));
+        system.toast({ title: "Follow change wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+      });
       system.haptic(nowFollowing ? [6, 20, 6] : 5);
       return nowFollowing;
     },
-    [following, setFollowing, setMe, remoteUsers, system],
+    [following, requestedFollowing, setFollowing, setMe, apiUserId, system],
   );
 
   /* ------------------------------- chat ----------------------------- */
@@ -450,112 +489,19 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
     [setConversations],
   );
 
-  const deliverLater = useCallback(
-    (conversationId: string, messageId: string) => {
-      window.setTimeout(() => {
-        patchConv(conversationId, (c) => ({
-          ...c,
-          messages: c.messages.map((m) => (m.id === messageId && m.status === "sending" ? { ...m, status: "sent" } : m)),
-        }));
-      }, 420);
-      window.setTimeout(() => {
-        patchConv(conversationId, (c) => ({
-          ...c,
-          messages: c.messages.map((m) => (m.id === messageId && m.status === "sent" ? { ...m, status: "delivered" } : m)),
-        }));
-      }, 1100);
-      window.setTimeout(() => {
-        patchConv(conversationId, (c) => ({
-          ...c,
-          messages: c.messages.map((m) => (m.id === messageId ? { ...m, status: "read" } : m)),
-        }));
-      }, 2600);
-    },
-    [patchConv],
-  );
-
-  const simulateReply = useCallback(
-    (conversationId: string) => {
-      const conv = conversations.find((c) => c.id === conversationId);
-      if (!conv) return;
-      const others = conv.participantIds.filter((id) => id !== ME);
-      if (!others.length) return;
-      const author = others[Math.floor(Math.random() * others.length)]!;
-      const typingDelay = 900 + Math.random() * 700;
-      const replyDelay = typingDelay + 1600 + Math.random() * 1800;
-
-      window.setTimeout(() => patchConv(conversationId, (c) => ({ ...c, typing: true })), typingDelay);
-      window.setTimeout(() => {
-        const text = demoIncoming[Math.floor(Math.random() * demoIncoming.length)]!;
-        const message: Message = {
-          id: uid("m"),
-          conversationId,
-          authorId: author,
-          kind: "text",
-          text,
-          createdAt: Date.now(),
-          mine: false,
-          status: "delivered",
-        };
-        patchConv(conversationId, (c) => ({ ...c, typing: false, messages: [...c.messages, message] }));
-        const openInThread = window.location.hash.includes(conversationId);
-        if (!openInThread) {
-          pushNotificationLocal({
-            kind: "message",
-            actorId: author,
-            title: `${userDb[author]?.name ?? "Someone"} sent you a message`,
-            body: text,
-            preview: text,
-            conversationId,
-            to: `/chats/${conversationId}`,
-          });
-          system.pushBanner({
-            title: userDb[author]?.name ?? "New message",
-            body: text,
-            avatar: userDb[author]?.avatar,
-            time: "now",
-            tone: "message",
-            onOpen: () => (window.location.hash = `#/chats/${conversationId}`),
-            onMarkRead: () => markReadLocal(conversationId),
-          });
-          system.showIsland({
-            leading: undefined,
-            title: userDb[author]?.name ?? "Message",
-            subtitle: text,
-            onOpen: () => (window.location.hash = `#/chats/${conversationId}`),
-            duration: 4200,
-          });
-        }
-        system.playSound("pop");
-      }, replyDelay);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [conversations, patchConv, system],
-  );
-
-  const pushNotificationLocal = useCallback(
-    (n: Omit<AppNotification, "id" | "createdAt" | "read"> & { createdAt?: number }) => {
-      const full: AppNotification = { id: uid("n"), createdAt: n.createdAt ?? Date.now(), read: false, ...n };
-      setNotifications((prev) => [full, ...prev].slice(0, 60));
-      return full;
-    },
-    [setNotifications],
-  );
-
-  const markReadLocal = useCallback(
-    (conversationId: string) => patchConv(conversationId, (c) => ({ ...c, unread: 0 })),
-    [patchConv],
-  );
-
   const sendMessage = useCallback<StoreCtx["sendMessage"]>(
     (conversationId, input) => {
-      if (apiUserId && isObjectId(conversationId)) {
-        if ((input.kind ?? "text") !== "text" || !input.text?.trim()) {
-          system.toast({ title: "Attachment sending is unavailable", description: "Media upload support is not connected to chat yet.", tone: "warning" });
+      if (!apiUserId || !isObjectId(conversationId)) {
+        system.toast({ title: "Sign in to send messages", tone: "warning" });
+        return;
+      }
+      {
+        if ((input.kind ?? "text") !== "text" && !input.attachmentIds?.length || !input.text?.trim() && !input.attachmentIds?.length) {
+          system.toast({ title: "Message is empty", description: "Add text or an attachment before sending.", tone: "warning" });
           return;
         }
         const id = uid("pending");
-        const optimistic: Message = { id, conversationId, authorId: ME, kind: "text", text: input.text.trim(), replyTo: input.replyTo, createdAt: Date.now(), mine: true, status: "sending" };
+        const optimistic: Message = { id, conversationId, authorId: ME, kind: input.kind ?? "text", text: input.text?.trim(), replyTo: input.replyTo, createdAt: Date.now(), mine: true, status: "sending" };
         patchConv(conversationId, (conversation) => ({ ...conversation, messages: [...conversation.messages, optimistic] }));
         const finish = (raw: unknown) => {
           const message = backend.mapMessage(raw, conversationId);
@@ -565,8 +511,13 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
           });
           system.playSound("send");
         };
-        if (chatSocket) {
-          chatSocket.emit("message:send", { conversationId, text: input.text.trim(), replyTo: input.replyTo?.id }, (result: { message?: unknown; error?: string }) => {
+        if (input.attachmentIds?.length) {
+          void backend.sendAttachments(conversationId, input.attachmentIds, input.text?.trim()).then(finish).catch((error) => {
+            patchConv(conversationId, (conversation) => ({ ...conversation, messages: conversation.messages.filter((item) => item.id !== id) }));
+            system.toast({ title: "Attachment wasn’t sent", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+          });
+        } else if (chatSocket) {
+          chatSocket.emit("message:send", { conversationId, text: input.text!.trim(), replyTo: input.replyTo?.id }, (result: { message?: unknown; error?: string }) => {
             if (result?.message) finish(result.message);
             else {
               patchConv(conversationId, (conversation) => ({ ...conversation, messages: conversation.messages.filter((item) => item.id !== id) }));
@@ -574,36 +525,15 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
             }
           });
         } else {
-          void backend.sendMessage(conversationId, input.text.trim(), input.replyTo?.id).then(finish).catch((error) => {
+          void backend.sendMessage(conversationId, input.text!.trim(), input.replyTo?.id).then(finish).catch((error) => {
             patchConv(conversationId, (conversation) => ({ ...conversation, messages: conversation.messages.filter((item) => item.id !== id) }));
             system.toast({ title: "Message wasn’t sent", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
           });
         }
         return;
       }
-      const id = uid("m");
-      const message: Message = {
-        id,
-        conversationId,
-        authorId: ME,
-        kind: input.kind ?? "text",
-        text: input.text,
-        media: input.media,
-        duration: input.duration,
-        fileName: input.fileName,
-        fileSize: input.fileSize,
-        replyTo: input.replyTo,
-        createdAt: Date.now(),
-        mine: true,
-        status: "sending",
-      };
-      patchConv(conversationId, (c) => ({ ...c, messages: [...c.messages, message] }));
-      system.playSound("send");
-      system.haptic(6);
-      deliverLater(conversationId, id);
-      if (Math.random() > 0.25) simulateReply(conversationId);
     },
-    [patchConv, system, deliverLater, simulateReply, apiUserId, chatSocket],
+    [patchConv, system, apiUserId, chatSocket],
   );
 
   const editMessage = useCallback<StoreCtx["editMessage"]>(
@@ -682,12 +612,11 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
 
   const markConversationRead = useCallback<StoreCtx["markConversationRead"]>(
     (conversationId) => {
-      const conversation = conversations.find((item) => item.id === conversationId);
       patchConv(conversationId, (c) => ({ ...c, unread: 0 }));
       setNotifications((prev) => prev.map((n) => (n.conversationId === conversationId ? { ...n, read: true } : n)));
-      if (chatSocket && conversation) conversation.messages.filter((message) => !message.mine && isObjectId(message.id)).forEach((message) => chatSocket.emit("message:read", { conversationId, messageId: message.id }));
+      if (apiUserId && isObjectId(conversationId)) void backend.readConversation(conversationId).catch((error) => system.toast({ title: "Read status wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
     },
-    [patchConv, setNotifications, conversations, chatSocket],
+    [patchConv, setNotifications, apiUserId, system],
   );
 
   const setTyping = useCallback((conversationId: string, active: boolean) => {
@@ -707,35 +636,27 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
         setConversations((prev) => [created, ...prev.filter((item) => item.id !== id)]);
         return id;
       }).catch((error) => { system.toast({ title: "Could not start conversation", description: error instanceof Error ? error.message : "Try again.", tone: "error" }); throw error; });
-      const id = uid("cv");
-      const conv: Conversation = { id, participantIds: [userId], messages: [], unread: 0, wallpaper: "midnight" };
-      setConversations((prev) => [conv, ...prev]);
-      return Promise.resolve(id);
+      system.toast({ title: "Sign in to start a conversation", tone: "warning" });
+      return Promise.reject(new Error("Sign in to start a conversation."));
     },
     [conversations, setConversations, apiUserId, system],
   );
 
   const forwardMessage = useCallback<StoreCtx["forwardMessage"]>(
     (conversationId, message) => {
-      const id = uid("m");
-      const copy: Message = {
-        ...message,
-        id,
-        conversationId,
-        authorId: ME,
-        mine: true,
-        status: "sending",
-        createdAt: Date.now(),
-        reactions: [],
-        replyTo: undefined,
-        forwarded: true,
-        deleted: false,
-      };
-      patchConv(conversationId, (c) => ({ ...c, messages: [...c.messages, copy] }));
-      deliverLater(conversationId, id);
-      system.toast({ title: "Message forwarded", tone: "success" });
+      if (!apiUserId || !isObjectId(message.id) || !isObjectId(conversationId)) {
+        system.toast({ title: "Message could not be forwarded", description: "This message or conversation is not available on the authenticated service.", tone: "warning" });
+        return;
+      }
+      void backend.forwardMessage(message.id, [conversationId]).then(({ messages }) => {
+        for (const raw of messages) {
+          const forwarded = backend.mapMessage(raw, conversationId);
+          patchConv(conversationId, (conversation) => ({ ...conversation, messages: conversation.messages.some((item) => item.id === forwarded.id) ? conversation.messages : [...conversation.messages, forwarded] }));
+        }
+        system.toast({ title: "Message forwarded", tone: "success" });
+      }).catch((error) => system.toast({ title: "Message wasn’t forwarded", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
     },
-    [patchConv, deliverLater, system],
+    [apiUserId, patchConv, system],
   );
 
   /* -------------------------- notifications ------------------------- */
@@ -757,11 +678,6 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
     [setNotifications, system],
   );
 
-  const pushNotification = useCallback<StoreCtx["pushNotification"]>(
-    (n) => pushNotificationLocal(n),
-    [pushNotificationLocal],
-  );
-
   /* ------------------------------ search ---------------------------- */
 
   const addRecentSearch = useCallback(
@@ -773,106 +689,6 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
     [setRecentSearches],
   );
   const clearRecentSearches = useCallback(() => setRecentSearches([]), [setRecentSearches]);
-
-  const resetDemoData = useCallback(() => {
-    setPosts(seedPosts);
-    setConversations(seedConversations);
-    setNotifications(seedNotifications);
-    setMe(userDb[ME]);
-    setFollowing(["u1", "u2", "u4", "u5", "u6"]);
-    system.toast({ title: "Demo data restored", tone: "info" });
-  }, [setPosts, setConversations, setNotifications, setMe, setFollowing, system]);
-
-  /* -------------------- ambient demo activity stream ---------------- */
-  useEffect(() => {
-    if (!ambient || !ready) return;
-    let cancelled = false;
-    const schedule = () => {
-      const wait = 38000 + Math.random() * 26000;
-      return window.setTimeout(fire, wait);
-    };
-    const fire = () => {
-      if (cancelled || document.visibilityState !== "visible") {
-        timer = schedule();
-        return;
-      }
-      const roll = Math.random();
-      const actorPool = ["u1", "u2", "u4", "u5", "u6", "u9"];
-      const actor = actorPool[Math.floor(Math.random() * actorPool.length)]!;
-      const u = userDb[actor];
-      if (roll < 0.5) {
-        const body = demoIncoming[Math.floor(Math.random() * demoIncoming.length)]!;
-        const conv = conversations.find((c) => c.participantIds.includes(actor)) ?? conversations[0];
-        if (conv) {
-          const message: Message = {
-            id: uid("m"),
-            conversationId: conv.id,
-            authorId: actor,
-            kind: "text",
-            text: body,
-            createdAt: Date.now(),
-            mine: false,
-            status: "delivered",
-          };
-          patchConv(conv.id, (c) => ({ ...c, messages: [...c.messages, message], unread: c.unread + 1 }));
-          pushNotificationLocal({
-            kind: "message",
-            actorId: actor,
-            title: `${u?.name ?? "Someone"} sent you a message`,
-            body,
-            preview: body,
-            conversationId: conv.id,
-            to: `/chats/${conv.id}`,
-          });
-          system.pushBanner({
-            title: u?.name ?? "New message",
-            body,
-            avatar: u?.avatar,
-            time: "now",
-            tone: "message",
-            onOpen: () => (window.location.hash = `#/chats/${conv.id}`),
-            onMarkRead: () => markReadLocal(conv.id),
-            onReply: (text) =>
-              sendMessage(conv.id, { text }),
-            expandedBody: `${conv.group ? conv.title : u?.institution ?? ""} · tap to open the conversation`,
-          });
-          system.showIsland({ title: u?.name ?? "Message", subtitle: body, duration: 4200 });
-        }
-      } else if (roll < 0.8) {
-        const n = pushNotificationLocal({
-          kind: roll < 0.65 ? "like" : "follow",
-          actorId: actor,
-          title:
-            roll < 0.65
-              ? `${u?.name ?? "Someone"} liked your post`
-              : `${u?.name ?? "Someone"} started following you`,
-          body: roll < 0.65 ? "“Shipped a tiny feature tonight…”" : `${u?.institution ?? ""} · ${u?.followers ?? 0} followers`,
-          to: roll < 0.65 ? "/home" : `/profile/${actor}`,
-        });
-        system.pushBanner({
-          title: n.title,
-          body: n.body,
-          avatar: u?.avatar,
-          time: "now",
-          onOpen: () => (window.location.hash = `#${n.to}`),
-          onMarkRead: () => markNotificationRead(n.id),
-        });
-      } else {
-        system.showIsland({
-          title: "CampusLaugh",
-          subtitle: "Trending near you: #HostelChronicles · 12.4K posts",
-          duration: 5200,
-        });
-      }
-      timer = schedule();
-    };
-    let timer = schedule();
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ambient, ready]);
 
   const visiblePosts = remotePosts ?? posts;
   const bookmarks = useMemo(() => visiblePosts.filter((p) => p.bookmarked), [visiblePosts]);
@@ -890,15 +706,17 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
       apiUserId,
       conversations,
       notifications: sortDesc(notifications, (n) => n.createdAt),
+      notificationsLoading,
+      notificationsError,
+      reloadNotifications,
       me,
-      users: { ...userDb, [ME]: me, ...remoteUsers },
+      users: { [ME]: me, ...remoteUsers },
       following,
+      requestedFollowing,
       bookmarks,
       recentSearches,
-      ambient,
       unreadTotal,
       unreadNotifications,
-      setAmbient,
       userById,
       postById: (id) => visiblePosts.find((p) => p.id === id) ?? posts.find((p) => p.id === id),
       conversationById: (id) => conversations.find((c) => c.id === id),
@@ -915,6 +733,7 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
       updateProfile,
       toggleFollow,
       isFollowing,
+      isFollowRequested,
       sendMessage,
       editMessage,
       deleteMessage,
@@ -931,19 +750,17 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
       markAllNotificationsRead,
       clearNotifications,
       removeNotification,
-      pushNotification,
       addRecentSearch,
       clearRecentSearches,
-      resetDemoData,
     }),
     [
-      ready, posts, visiblePosts, remotePosts, setRemoteFeed, setPostComments, cacheUser, apiUserId, remoteUsers, conversations, notifications, me, following, bookmarks, recentSearches, ambient,
+      ready, posts, visiblePosts, remotePosts, setRemoteFeed, setPostComments, cacheUser, apiUserId, remoteUsers, conversations, notifications, notificationsLoading, notificationsError, reloadNotifications, me, following, requestedFollowing, bookmarks, recentSearches,
       unreadTotal, unreadNotifications, userById, toggleLike, toggleBookmark, toggleRepost, hidePost,
       reportPost, votePoll, addComment, toggleCommentLike, createPost, deletePost, updateProfile,
-      toggleFollow, isFollowing, sendMessage, editMessage, deleteMessage, reactMessage,
+      toggleFollow, isFollowing, isFollowRequested, sendMessage, editMessage, deleteMessage, reactMessage,
       markConversationRead, setTyping, togglePin, toggleMute, toggleArchive, setWallpaper, startConversation,
       forwardMessage, markNotificationRead, markAllNotificationsRead, clearNotifications,
-      removeNotification, pushNotification, addRecentSearch, clearRecentSearches, resetDemoData,
+      removeNotification, addRecentSearch, clearRecentSearches,
     ],
   );
 
