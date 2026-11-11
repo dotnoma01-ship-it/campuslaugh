@@ -151,6 +151,15 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setMe, system.toast]);
 
+  useEffect(() => {
+    if (!apiUserId) return;
+    let live = true;
+    void backend.getNotifications().then((items) => { if (live) setNotifications(items); }).catch(() => {
+      if (live) system.toast({ title: "Could not load notifications", description: "Try again when the connection is available.", tone: "error" });
+    });
+    return () => { live = false; };
+  }, [apiUserId, setNotifications, system.toast]);
+
   const userById = useCallback((id: string) => id === ME || id === me.id ? me : remoteUsers[id] ?? userDb[id] ?? me, [me, remoteUsers]);
   const setRemoteFeed = useCallback((items: Post[], users: User[]) => {
     setRemotePosts(items);
@@ -215,18 +224,25 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
 
   const toggleRepost = useCallback(
     (postId: string) => {
+      const previous = remotePosts?.find((post) => post.id === postId)?.reposted ?? false;
       patchPost(postId, (p) => {
         const reposted = !p.reposted;
         if (reposted) system.toast({ title: "Reposted to your campus", tone: "success" });
         return { ...p, reposted, reposts: p.reposts + (reposted ? 1 : -1) };
       });
+      if (isObjectId(postId) && remotePosts?.some((p) => p.id === postId)) void backend.toggleRepost(postId).catch((error) => {
+        patchPost(postId, (p) => ({ ...p, reposted: previous, reposts: Math.max(0, p.reposts + (previous ? 1 : -1)) }));
+        system.toast({ title: "Repost wasn’t saved", description: error instanceof Error ? error.message : "Try again.", tone: "error" });
+      });
     },
-    [patchPost, system],
+    [patchPost, remotePosts, system],
   );
 
   const hidePost = useCallback(
     (postId: string) => {
       setPosts((prev) => prev.filter((p) => p.id !== postId));
+      setRemotePosts((prev) => prev?.filter((p) => p.id !== postId) ?? null);
+      if (isObjectId(postId)) void backend.hidePost(postId).catch((error) => system.toast({ title: "Post wasn’t hidden", description: error instanceof Error ? error.message : "Try again.", tone: "error" }));
       system.toast({ title: "Post hidden", description: "You'll see fewer posts like this", tone: "info" });
     },
     [setPosts, system],
@@ -624,17 +640,20 @@ function StoreProviderInner({ children }: { children: React.ReactNode }) {
   /* -------------------------- notifications ------------------------- */
 
   const markNotificationRead = useCallback(
-    (id: string) => setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n))),
-    [setNotifications],
+    (id: string) => {
+      setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+      if (isObjectId(id)) void request(`/notifications/${id}/read`, { method: "PATCH" }).catch(() => system.toast({ title: "Read status wasn’t saved", tone: "error" }));
+    },
+    [setNotifications, system],
   );
   const markAllNotificationsRead = useCallback(
-    () => setNotifications((prev) => prev.map((n) => ({ ...n, read: true }))),
-    [setNotifications],
+    () => { setNotifications((prev) => prev.map((n) => ({ ...n, read: true }))); if (apiUserId) void request("/notifications/read-all", { method: "PATCH" }).catch(() => system.toast({ title: "Read status wasn’t saved", tone: "error" })); },
+    [apiUserId, setNotifications, system],
   );
-  const clearNotifications = useCallback(() => setNotifications([]), [setNotifications]);
+  const clearNotifications = useCallback(() => { setNotifications([]); if (apiUserId) void request("/notifications", { method: "DELETE" }).catch(() => system.toast({ title: "Notifications weren’t cleared", tone: "error" })); }, [apiUserId, setNotifications, system]);
   const removeNotification = useCallback(
-    (id: string) => setNotifications((prev) => prev.filter((n) => n.id !== id)),
-    [setNotifications],
+    (id: string) => { setNotifications((prev) => prev.filter((n) => n.id !== id)); if (isObjectId(id)) void request(`/notifications/${id}`, { method: "DELETE" }).catch(() => system.toast({ title: "Notification wasn’t removed", tone: "error" })); },
+    [setNotifications, system],
   );
 
   const pushNotification = useCallback<StoreCtx["pushNotification"]>(
